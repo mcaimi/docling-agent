@@ -1,24 +1,24 @@
 """OpenAI-compatible embedding client and batch embedding helpers."""
 
-import os
-
 from openai import OpenAI
+
+from src import agent_settings
 
 _embedding_client: OpenAI | None = None
 
 
 def get_embedding_client() -> OpenAI:
-    """Return a singleton OpenAI client configured from environment variables."""
+    """Return a singleton OpenAI client configured from agent settings (.env + config defaults)."""
     global _embedding_client
     if _embedding_client is None:
-        api_key = os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY")
+        api_key = agent_settings.EMBEDDING_API_KEY or agent_settings.OPENAI_API_KEY
         if not api_key:
             raise ValueError(
                 "Set EMBEDDING_API_KEY (or OPENAI_API_KEY) for the embedding endpoint."
             )
         _embedding_client = OpenAI(
             api_key=api_key,
-            base_url=os.getenv("EMBEDDING_BASE_URL"),
+            base_url=agent_settings.EMBEDDING_BASE_URL,
         )
     return _embedding_client
 

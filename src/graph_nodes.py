@@ -3,7 +3,7 @@
 from typing import Any
 
 from src.chunking import chunk_document_records
-from src.config import CHUNK_OVERLAP, CHUNK_SIZE, EMBEDDING_MODEL
+from src.agent_settings import CHUNK_OVERLAP, CHUNK_SIZE, EMBEDDING_MODEL
 from src.embeddings import embed_texts
 from src.graph_state import PDFProcessorState
 from src.pdf_conversion import convert_pdf_paths_to_documents
@@ -17,7 +17,10 @@ def load_pdfs(state: PDFProcessorState) -> dict[str, Any]:
 
 
 def convert_pdfs(state: PDFProcessorState) -> dict[str, Any]:
-    documents = convert_pdf_paths_to_documents(state["pdf_files"])
+    documents = convert_pdf_paths_to_documents(
+        state["pdf_files"],
+        pipeline=state.get("conversion_pipeline"),
+    )
     print(f"Converted {len(documents)} documents")
     return {"documents": documents}
 

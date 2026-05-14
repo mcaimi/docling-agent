@@ -1,10 +1,10 @@
 """LangGraph compile-time wiring and public entrypoints for the PDF workflow."""
 
-import os
+from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
 
-from src.config import PDF_FOLDER_PATH
+from src.agent_settings import PDF_FOLDER_PATH
 from src.graph_nodes import (
     chunk_documents,
     convert_pdfs,
@@ -32,7 +32,11 @@ def create_pdf_processor_graph():
     return workflow.compile()
 
 
-def process_pdfs(folder_path: str | None = None) -> PDFProcessorState:
+def process_pdfs(
+    folder_path: str | None = None,
+    *,
+    conversion_pipeline: Literal["standard", "vlm"] | None = None,
+) -> PDFProcessorState:
     """Run the compiled graph on ``folder_path`` (or the configured default)."""
     workflow = create_pdf_processor_graph()
 
@@ -42,12 +46,14 @@ def process_pdfs(folder_path: str | None = None) -> PDFProcessorState:
         "documents": [],
         "embeddings": [],
     }
+    if conversion_pipeline is not None:
+        initial_state["conversion_pipeline"] = conversion_pipeline
 
     return workflow.invoke(initial_state)
 
 
 if __name__ == "__main__":
-    folder_path = os.getenv("PDF_FOLDER_PATH", PDF_FOLDER_PATH)
+    folder_path = PDF_FOLDER_PATH
 
     print(f"Processing PDFs in folder: {folder_path}")
 
