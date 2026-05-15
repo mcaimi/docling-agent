@@ -1,64 +1,38 @@
+#!/usr/bin/env python
 """Convert PDF files to text records using docling (standard or remote VLM pipeline)."""
 
 import json
 import os
-
-from src import agent_settings as _agent_settings  # noqa: F401 — load .env before os.getenv below
 from typing import Any, Literal, cast
 
-from docling.datamodel.base_models import InputFormat
-from docling.datamodel.document import ConversionResult
-from docling.datamodel.pipeline_options import VlmConvertOptions, VlmPipelineOptions
-from docling.datamodel.vlm_engine_options import ApiVlmEngineOptions
-from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling.models.inference_engines.vlm.base import VlmEngineType
-from docling.pipeline.vlm_pipeline import VlmPipeline
-from pydantic import AnyUrl
-
-from src.config import (
-    DOCLING_PDF_PIPELINE_DEFAULT,
-    DOCLING_PDF_PIPELINE_ENV,
-    DOCLING_VLM_API_HEADERS_ENV,
-    DOCLING_VLM_API_PARAMS_ENV,
-    DOCLING_VLM_API_URL_ENV,
-    DOCLING_VLM_PRESET_DEFAULT,
-    DOCLING_VLM_PRESET_ENV,
-)
+# import the docling modules
+try:
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.document import ConversionResult
+    from docling.datamodel.pipeline_options import VlmConvertOptions, VlmPipelineOptions
+    from docling.datamodel.vlm_engine_options import ApiVlmEngineOptions
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+    from docling.models.inference_engines.vlm.base import VlmEngineType
+    from docling.pipeline.vlm_pipeline import VlmPipeline
+    from pydantic import AnyUrl
+except ImportError as e:
+    raise ImportError(f"Failed to import required modules: {e}") from e
 
 _standard_converter: DocumentConverter | None = None
 _vlm_converter_cache: tuple[str, DocumentConverter] | None = None
 
-
-def _parse_json_object_env(var_name: str) -> dict[str, Any]:
-    raw = os.getenv(var_name)
-    if not raw or not raw.strip():
-        return {}
-    try:
-        out = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid JSON in {var_name}: {e}") from e
-    if not isinstance(out, dict):
-        raise ValueError(f"{var_name} must be a JSON object, got {type(out).__name__}")
-    return cast(dict[str, Any], out)
-
-
-def _resolved_pipeline(pipeline: Literal["standard", "vlm"] | None) -> Literal["standard", "vlm"]:
-    if pipeline is not None:
-        return pipeline
-    raw = (os.getenv(DOCLING_PDF_PIPELINE_ENV) or DOCLING_PDF_PIPELINE_DEFAULT).strip().lower()
-    if raw in ("standard", "vlm"):
-        return cast(Literal["standard", "vlm"], raw)
-    print(f"Unknown {DOCLING_PDF_PIPELINE_ENV}={raw!r}, using {DOCLING_PDF_PIPELINE_DEFAULT}")
-    return "standard"
-
-
+# instantiate the Docling DocumentConverter for the standard pipeline
 def _get_standard_converter() -> DocumentConverter:
     global _standard_converter
     if _standard_converter is None:
-        _standard_converter = DocumentConverter()
+        _standard_converter = DocumentConverter(
+            allowed_formats=[InputFormat.PDF],
+        )
     return _standard_converter
 
-
+# create a cache key for the VLM converter
+# uses the URL, preset, headers, and params to create a unique key
+# this is used to cache the VLM converter
 def _vlm_cache_key(
     url: str,
     preset: str,
@@ -70,7 +44,9 @@ def _vlm_cache_key(
         sort_keys=True,
     )
 
-
+# create a new VLM converter
+# if not already cached, put the converter in the cache
+# and return the converter
 def _get_vlm_converter(
     url: str,
     preset: str,
@@ -91,10 +67,12 @@ def _get_vlm_converter(
             params=params,
         ),
     )
+
     pipeline_options = VlmPipelineOptions(
         enable_remote_services=True,
         vlm_options=vlm_options,
     )
+
     converter = DocumentConverter(
         allowed_formats=[InputFormat.PDF],
         format_options={
@@ -107,7 +85,8 @@ def _get_vlm_converter(
     _vlm_converter_cache = (key, converter)
     return converter
 
-
+# enrich the conversion result from the docling document converter
+# into a record with the content and metadata
 def _conversion_result_to_record(
     pdf_path: str,
     conv: ConversionResult,
@@ -130,11 +109,13 @@ def _conversion_result_to_record(
     }
     return {"content": text_content, "metadata": metadata}
 
-
+# main function to convert the PDF paths to documents
+# uses the pipeline to determine the converter to use
+# returns a list of documents
 def convert_pdf_paths_to_documents(
     pdf_paths: list[str],
     *,
-    pipeline: Literal["standard", "vlm"] | None = None,
+    pipeline: Literal["standard", "vlm"] = "standard",
     vlm_api_url: str | None = None,
     vlm_api_headers: dict[str, str] | None = None,
     vlm_api_params: dict[str, Any] | None = None,
@@ -148,33 +129,28 @@ def convert_pdf_paths_to_documents(
     chat endpoint. When ``pipeline`` is omitted, ``DOCLING_PDF_PIPELINE`` is
     used (default ``standard``).
 
-    For VLM mode, set ``DOCLING_VLM_API_URL`` or pass ``vlm_api_url``. Optional
-    ``DOCLING_VLM_API_HEADERS`` / ``DOCLING_VLM_API_PARAMS`` (JSON objects) or
-    the corresponding keyword arguments; ``DOCLING_VLM_PRESET`` (default
+    For VLM mode, set ``DOCLING_VLM_API_URL_ENV`` or pass ``vlm_api_url``. Optional
+    ``DOCLING_VLM_API_HEADERS_ENV`` / ``DOCLING_VLM_API_PARAMS_ENV`` (JSON objects) or
+    the corresponding keyword arguments; ``DOCLING_VLM_PRESET_ENV`` (default
     ``smoldocling``) or ``vlm_preset``.
 
     Failures for individual files are logged to stdout; successful paths are included.
     """
-    mode = _resolved_pipeline(pipeline)
-
-    headers_env = _parse_json_object_env(DOCLING_VLM_API_HEADERS_ENV)
-    headers_merged: dict[str, str] = {str(k): str(v) for k, v in headers_env.items()}
-    if vlm_api_headers is not None:
-        headers_merged = {str(k): str(v) for k, v in vlm_api_headers.items()}
-
-    params_merged: dict[str, Any] = dict(_parse_json_object_env(DOCLING_VLM_API_PARAMS_ENV))
-    if vlm_api_params is not None:
-        params_merged = dict(vlm_api_params)
-
-    preset = (vlm_preset or os.getenv(DOCLING_VLM_PRESET_ENV) or DOCLING_VLM_PRESET_DEFAULT).strip()
+    mode = pipeline
+    print(f"Pipeline: {pipeline}")
+    print(f"VLM API URL: {vlm_api_url}")
+    print(f"Mode: {mode}")
 
     if mode == "vlm":
-        url = (vlm_api_url or os.getenv(DOCLING_VLM_API_URL_ENV) or "").strip()
+        url = vlm_api_url.strip()
+        preset = vlm_preset.strip()
+        headers = vlm_api_headers
+        params = vlm_api_params
         if not url:
             raise ValueError(
-                f"VLM pipeline requires {DOCLING_VLM_API_URL_ENV} or vlm_api_url=..."
+                f"VLM pipeline requires vlm_api_url=..."
             )
-        converter = _get_vlm_converter(url, preset, headers_merged, params_merged)
+        converter = _get_vlm_converter(url, preset, headers, params)
     else:
         converter = _get_standard_converter()
 
