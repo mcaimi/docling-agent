@@ -166,3 +166,7 @@ Declared in `pyproject.toml`:
 ## License
 
 GPL-3
+
+## AI Disclosure
+
+This project has been developed with the help of an AI Model. Specifically an instance of Qwen3.6-35B-A3B running in vLLM
