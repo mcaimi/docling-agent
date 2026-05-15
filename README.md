@@ -68,6 +68,101 @@ Declared in `pyproject.toml`:
 - `openai` (1.14+)
 - `python-dotenv` (1.2+)
 
+## Architecture
+
+### Workflow Graph
+
+```mermaid
+flowchart LR
+    START((START)) --> load["load_pdfs<br/>(list PDF files)"]
+    load --> convert["convert_pdfs<br/>(docling conversion)"]
+    convert --> chunk["chunk_documents<br/>(split + overlap)"]
+    chunk --> embed["generate_embeddings<br/>(embedding API call)"]
+    embed --> END((END))
+```
+
+### Class Diagram
+
+```mermaid
+classDiagram
+    class PDFProcessorState {
+        <<TypedDict>>
+        +str folder_path
+        +str api_key
+        +str embedding_model
+        +dict connection_params
+        +NotRequired[int] chunk_size
+        +NotRequired[int] chunk_overlap
+        +list[str] pdf_files
+        +list[dict] documents
+        +list[float | None] embeddings
+        +NotRequired[str] conversion_pipeline
+        +NotRequired[str] vlm_api_url
+        +NotRequired[dict] vlm_api_headers
+        +NotRequired[dict] vlm_api_params
+        +NotRequired[str] vlm_preset
+    }
+
+    class pdf_agent {
+        +create_pdf_processor_graph() CompiledGraph
+        +process_pdfs(folder_path, conversion_pipeline) PDFProcessorState
+    }
+
+    class graph_nodes {
+        +load_pdfs(PDFProcessorState) dict
+        +convert_pdfs(PDFProcessorState) dict
+        +chunk_documents(PDFProcessorState) dict
+        +generate_embeddings(PDFProcessorState) dict
+    }
+
+    class agent_settings {
+        +str EMBEDDING_MODEL
+        +int EMBEDDING_DIMENSIONS
+        +int CHUNK_SIZE
+        +int CHUNK_OVERLAP
+        +str PDF_FOLDER_PATH
+        +str EMBEDDING_BASE_URL
+        +str EMBEDDING_API_KEY
+        +str DOCLING_PDF_PIPELINE_ENV
+        +str DOCLING_VLM_API_URL_ENV
+        ...
+    }
+
+    class config {
+        +str EMBEDDING_MODEL "text-embedding-ada-002"
+        +int EMBEDDING_DIMENSIONS 1536
+        +int CHUNK_SIZE 1000
+        +int CHUNK_OVERLAP 100
+        +str PDF_FOLDER_PATH "./pdfs"
+        ...
+    }
+
+    class _parse_json_object_str {
+        +str json_str ~ dict | None
+    }
+
+    pdf_agent --> graph_nodes : adds nodes to graph
+    pdf_agent --> PDFProcessorState : operates on
+    graph_nodes --> PDFProcessorState : updates
+    pdf_agent --> agent_settings : reads settings
+    agent_settings ..|> config : overrides defaults
+    pdf_agent --> _parse_json_object_str : uses helper
+    graph_nodes <-- pdf_conversion : convert_pdf_paths_to_documents
+    graph_nodes <-- pdf_paths : list_pdf_paths
+    graph_nodes <-- chunking : chunk_document_records
+    graph_nodes <-- embeddings : embed_texts
+```
+
+<!-- existing dependency section for completeness -->
+## Dependencies
+
+Declared in `pyproject.toml`:
+
+- `langgraph` (1.2+)
+- `docling` (2.93+)
+- `openai` (1.14+)
+- `python-dotenv` (1.2+)
+
 ## License
 
 GPL-3
