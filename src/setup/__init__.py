@@ -1,0 +1,22 @@
+#!/usr/bin/env python
+
+from .agent_settings import *
+
+# module symbols
+__all__ = [
+    "EMBEDDING_MODEL",
+    "EMBEDDING_DIMENSIONS",
+    "CHUNK_SIZE",
+    "CHUNK_OVERLAP",
+    "PDF_FOLDER_PATH",
+    "EMBEDDING_BASE_URL",
+    "EMBEDDING_API_KEY",
+    "OPENAI_API_KEY",
+    "DOCLING_PDF_PIPELINE_ENV",
+    "DOCLING_PDF_PIPELINE_DEFAULT",
+    "DOCLING_VLM_API_URL_ENV",
+    "DOCLING_VLM_API_HEADERS_ENV",
+    "DOCLING_VLM_API_PARAMS_ENV",
+    "DOCLING_VLM_PRESET_ENV",
+    "DOCLING_VLM_PRESET_DEFAULT",
+]
