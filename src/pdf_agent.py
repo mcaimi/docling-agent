@@ -1,19 +1,34 @@
+#!/usr/bin/env python
 """LangGraph compile-time wiring and public entrypoints for the PDF workflow."""
 
 from typing import Literal
 
-from langgraph.graph import END, START, StateGraph
+# import langgraph
+try:
+    from langgraph.graph import END, START, StateGraph
+except ImportError as e:
+    raise ImportError(f"Failed to import required modules: {e}") from e
 
-from src.agent_settings import PDF_FOLDER_PATH
-from src.graph_nodes import (
-    chunk_documents,
-    convert_pdfs,
-    generate_embeddings,
-    load_pdfs,
-)
-from src.graph_state import PDFProcessorState
+# import the agent settings
+try:
+    from .setup import agent_settings
+    from .utils import _parse_json_object_str
+except ImportError as e:
+    raise ImportError(f"Failed to import required modules: {e}") from e
 
+# import the graph nodes and processor state
+try:
+    from .graph import (
+        chunk_documents,
+        convert_pdfs,
+        generate_embeddings,
+        load_pdfs,
+        PDFProcessorState,
+    )
+except ImportError as e:
+    raise ImportError(f"Failed to import required modules: {e}") from e
 
+# create the PDF processing workflow graph
 def create_pdf_processor_graph():
     """Create the PDF processing workflow graph."""
     workflow = StateGraph(PDFProcessorState)
@@ -32,6 +47,7 @@ def create_pdf_processor_graph():
     return workflow.compile()
 
 
+# process documents
 def process_pdfs(
     folder_path: str | None = None,
     *,
@@ -42,6 +58,19 @@ def process_pdfs(
 
     initial_state: PDFProcessorState = {
         "folder_path": folder_path or PDF_FOLDER_PATH,
+        "api_key": agent_settings.EMBEDDING_API_KEY or agent_settings.OPENAI_API_KEY,
+        "chunk_size": agent_settings.CHUNK_SIZE,
+        "chunk_overlap": agent_settings.CHUNK_OVERLAP,
+        "vlm_api_url": agent_settings.DOCLING_VLM_API_URL_ENV,
+        "conversion_pipeline": agent_settings.DOCLING_PDF_PIPELINE_ENV,
+        "embedding_model": agent_settings.EMBEDDING_MODEL,
+        "connection_params": {
+            "api_key": agent_settings.EMBEDDING_API_KEY or agent_settings.OPENAI_API_KEY,
+            "base_url": agent_settings.EMBEDDING_BASE_URL,
+        },
+        "vlm_api_headers": _parse_json_object_str(agent_settings.DOCLING_VLM_API_HEADERS_ENV),
+        "vlm_api_params": _parse_json_object_str(agent_settings.DOCLING_VLM_API_PARAMS_ENV),
+        "vlm_preset": agent_settings.DOCLING_VLM_PRESET_ENV,
         "pdf_files": [],
         "documents": [],
         "embeddings": [],
@@ -52,8 +81,9 @@ def process_pdfs(
     return workflow.invoke(initial_state)
 
 
+# main entrypoint
 if __name__ == "__main__":
-    folder_path = PDF_FOLDER_PATH
+    folder_path = agent_settings.PDF_FOLDER_PATH
 
     print(f"Processing PDFs in folder: {folder_path}")
 
