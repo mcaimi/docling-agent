@@ -21,6 +21,7 @@ except ImportError as e:
 _standard_converter: DocumentConverter | None = None
 _vlm_converter_cache: tuple[str, DocumentConverter] | None = None
 
+
 # instantiate the Docling DocumentConverter for the standard pipeline
 def _get_standard_converter() -> DocumentConverter:
     global _standard_converter
@@ -29,6 +30,7 @@ def _get_standard_converter() -> DocumentConverter:
             allowed_formats=[InputFormat.PDF],
         )
     return _standard_converter
+
 
 # create a cache key for the VLM converter
 # uses the URL, preset, headers, and params to create a unique key
@@ -43,6 +45,7 @@ def _vlm_cache_key(
         {"url": url, "preset": preset, "headers": headers, "params": params},
         sort_keys=True,
     )
+
 
 # create a new VLM converter
 # if not already cached, put the converter in the cache
@@ -85,6 +88,7 @@ def _get_vlm_converter(
     _vlm_converter_cache = (key, converter)
     return converter
 
+
 # enrich the conversion result from the docling document converter
 # into a record with the content and metadata
 def _conversion_result_to_record(
@@ -107,7 +111,12 @@ def _conversion_result_to_record(
         "title": title,
         "conversion_pipeline": conversion_pipeline,
     }
-    return {"content": text_content, "metadata": metadata}
+    return {
+        "docling_document": conv.document,
+        "content": text_content,
+        "metadata": metadata,
+    }
+
 
 # main function to convert the PDF paths to documents
 # uses the pipeline to determine the converter to use
@@ -147,9 +156,7 @@ def convert_pdf_paths_to_documents(
         headers = vlm_api_headers
         params = vlm_api_params
         if not url:
-            raise ValueError(
-                f"VLM pipeline requires vlm_api_url=..."
-            )
+            raise ValueError("VLM pipeline requires vlm_api_url=...")
         converter = _get_vlm_converter(url, preset, headers, params)
     else:
         converter = _get_standard_converter()

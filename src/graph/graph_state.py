@@ -19,6 +19,7 @@ class PDFProcessorState(TypedDict):
     embeddings: list[list[float] | None]
     embedding_model: str
     conversion_pipeline: NotRequired[Literal["standard", "vlm"]]
+    chunking_strategy: NotRequired[Literal["fixed", "hybrid"]]
     vlm_api_url: NotRequired[str]
     vlm_api_headers: NotRequired[dict[str, str]]
     vlm_api_params: NotRequired[dict[str, Any]]

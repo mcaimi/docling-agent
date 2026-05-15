@@ -12,6 +12,7 @@ OPENAI_API_KEY: str | None = None
 # Chunking configuration
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 100
+DOCLING_CHUNKING_STRATEGY = "fixed"
 
 # Document processing configuration
 PDF_FOLDER_PATH = "./pdfs"
@@ -26,3 +27,4 @@ DOCLING_VLM_API_HEADERS_ENV = "{}"
 DOCLING_VLM_API_PARAMS_ENV = "{}"
 DOCLING_VLM_PRESET_ENV = "smoldocling"
 DOCLING_VLM_PRESET_DEFAULT = "smoldocling"
+

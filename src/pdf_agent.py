@@ -28,6 +28,7 @@ try:
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
 
+
 # create the PDF processing workflow graph
 def create_pdf_processor_graph():
     """Create the PDF processing workflow graph."""
@@ -52,24 +53,31 @@ def process_pdfs(
     folder_path: str | None = None,
     *,
     conversion_pipeline: Literal["standard", "vlm"] | None = None,
+    chunking_strategy: Literal["fixed", "hybrid"] | None = None,
 ) -> PDFProcessorState:
     """Run the compiled graph on ``folder_path`` (or the configured default)."""
     workflow = create_pdf_processor_graph()
 
     initial_state: PDFProcessorState = {
-        "folder_path": folder_path or PDF_FOLDER_PATH,
+        "folder_path": folder_path,
         "api_key": agent_settings.EMBEDDING_API_KEY or agent_settings.OPENAI_API_KEY,
         "chunk_size": agent_settings.CHUNK_SIZE,
         "chunk_overlap": agent_settings.CHUNK_OVERLAP,
+        "chunking_strategy": agent_settings.DOCLING_CHUNKING_STRATEGY,
         "vlm_api_url": agent_settings.DOCLING_VLM_API_URL_ENV,
         "conversion_pipeline": agent_settings.DOCLING_PDF_PIPELINE_ENV,
         "embedding_model": agent_settings.EMBEDDING_MODEL,
         "connection_params": {
-            "api_key": agent_settings.EMBEDDING_API_KEY or agent_settings.OPENAI_API_KEY,
+            "api_key": agent_settings.EMBEDDING_API_KEY
+            or agent_settings.OPENAI_API_KEY,
             "base_url": agent_settings.EMBEDDING_BASE_URL,
         },
-        "vlm_api_headers": _parse_json_object_str(agent_settings.DOCLING_VLM_API_HEADERS_ENV),
-        "vlm_api_params": _parse_json_object_str(agent_settings.DOCLING_VLM_API_PARAMS_ENV),
+        "vlm_api_headers": _parse_json_object_str(
+            agent_settings.DOCLING_VLM_API_HEADERS_ENV
+        ),
+        "vlm_api_params": _parse_json_object_str(
+            agent_settings.DOCLING_VLM_API_PARAMS_ENV
+        ),
         "vlm_preset": agent_settings.DOCLING_VLM_PRESET_ENV,
         "pdf_files": [],
         "documents": [],
@@ -77,6 +85,9 @@ def process_pdfs(
     }
     if conversion_pipeline is not None:
         initial_state["conversion_pipeline"] = conversion_pipeline
+
+    if chunking_strategy is not None:
+        initial_state["chunking_strategy"] = chunking_strategy
 
     return workflow.invoke(initial_state)
 
