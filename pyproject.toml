@@ -1,7 +1,7 @@
 [project]
 name = "doc-ingestion-agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "LangGraph-based Agent that uses Docling to Convert, Chunk and Embed documents for AI"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
