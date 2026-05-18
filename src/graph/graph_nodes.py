@@ -58,7 +58,7 @@ def chunk_documents(state: PDFProcessorState) -> dict[str, Any]:
 # use a remote OpenAI-compatible embedding API to generate embeddings for the chunks
 def generate_embeddings(state: PDFProcessorState) -> dict[str, Any]:
     texts = [doc["content"] for doc in state["documents"]]
-    vectors = embed_texts(texts, state["embedding_model"], state["connection_params"])
+    vectors = embed_texts(texts, state["embedding_model"], state["embedding_base_url"], state["embedding_api_key"])
     print(f"Generated embeddings for {len(vectors)} chunks")
     return {"embeddings": vectors}
 

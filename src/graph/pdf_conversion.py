@@ -146,11 +146,10 @@ def convert_pdf_paths_to_documents(
     Failures for individual files are logged to stdout; successful paths are included.
     """
     mode = pipeline
-    print(f"Pipeline: {pipeline}")
-    print(f"VLM API URL: {vlm_api_url}")
-    print(f"Mode: {mode}")
+    print(f"Pipeline: {mode}")
 
     if mode == "vlm":
+        print(f"VLM API URL: {vlm_api_url}")
         url = vlm_api_url.strip()
         preset = vlm_preset.strip()
         headers = vlm_api_headers
