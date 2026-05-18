@@ -10,4 +10,4 @@ wheels/
 .venv
 
 # custom dotenv
-src/.env
+**/env.local
