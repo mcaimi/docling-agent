@@ -21,6 +21,7 @@ try:
     from .graph import (
         chunk_documents,
         convert_pdfs,
+        extract_config_from_prompt,
         generate_embeddings,
         load_pdfs,
         PDFProcessorState,
@@ -38,8 +39,10 @@ def create_pdf_processor_graph():
     workflow.add_node("convert_pdfs", convert_pdfs)
     workflow.add_node("chunk_documents", chunk_documents)
     workflow.add_node("generate_embeddings", generate_embeddings)
+    workflow.add_node("extract_config_from_prompt", extract_config_from_prompt)
 
-    workflow.add_edge(START, "load_pdfs")
+    workflow.add_edge(START, "extract_config_from_prompt")
+    workflow.add_edge("extract_config_from_prompt", "load_pdfs")
     workflow.add_edge("load_pdfs", "convert_pdfs")
     workflow.add_edge("convert_pdfs", "chunk_documents")
     workflow.add_edge("chunk_documents", "generate_embeddings")
@@ -61,18 +64,21 @@ def process_pdfs(
 
     return workflow.invoke(initial_state)
 
+
 # parse command line arguments
 def parse_arguments():
     parser = ArgumentParser(description="PDF processing agent")
     parser.add_argument(
-        "--envfile", 
-        type=str, 
-        default=".env", 
-        help="Environment file to use as configuration."
+        "--envfile",
+        type=str,
+        default=".env",
+        help="Environment file to use as configuration.",
     )
-    
+    parser.add_argument("--user_prompt", type=str, default="", help="The user prompt")
+
     # return the parsed arguments
     return parser.parse_args()
+
 
 # main entrypoint
 if __name__ == "__main__":
@@ -83,6 +89,7 @@ if __name__ == "__main__":
     # load environment variables
     try:
         agent_settings = load_environment_variables(envfile)
+        agent_settings["user_prompt"] = args.user_prompt
     except Exception as e:
         print(f"Error loading environment variables: {str(e)}")
         exit(1)
