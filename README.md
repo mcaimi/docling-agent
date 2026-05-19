@@ -24,6 +24,7 @@ agent_settings = load_environment_variables(".env")
 # or pass a config dict directly:
 # agent_settings = {
 #     "folder_path": "./pdfs",
+#     "user_prompt": "Use VLM pipeline and hybrid chunking with 500 char chunks",  # optional NLP extraction
 #     "embedding_model": "text-embedding-ada-002",
 #     "embedding_dimensions": 1536,
 #     "embedding_base_url": "https://api.openai.com/v1",
@@ -47,6 +48,8 @@ CLI (uses `FOLDER_PATH` and other variables from the `.env` file or the configur
 uv run python -m src.pdf_agent
 # Custom env file:
 uv run python -m src.pdf_agent --envfile .env.local
+# User prompt for NLP extraction:
+uv run python -m src.pdf_agent --user_prompt "Use VLM pipeline and hybrid chunking"
 ```
 
 ## Environment Variables
@@ -62,8 +65,7 @@ uv run python -m src.pdf_agent --envfile .env.local
 | `CHUNK_OVERLAP` | `100` | Overlap between consecutive fixed-size chunks |
 | `CONVERSION_PIPELINE` | `standard` | `standard` (docling pipeline) or `vlm` (VLM pipeline) |
 | `CHUNKING_STRATEGY` | `fixed` | `fixed` (character-based) or `hybrid` (document-aware) |
-| `SYSTEM_PROMPT` | `""` | System prompt for optional LLM preprocessing |
-| `LLM_MODEL` | `gpt-4o-mini` | LLM model for optional preprocessing |
+| `LLM_MODEL` | `gpt-4o-mini` | LLM model for NLP extraction and optional preprocessing |
 | `BASE_URL` | `https://api.openai.com/v1` | Base URL for the LLM |
 | `API_KEY` | `your-api-key-here` | API key for the LLM |
 | `VLM_API_URL` | `https://api.openai.com/v1` | Remote VLM endpoint URL (required when `CONVERSION_PIPELINE=vlm`) |
@@ -77,7 +79,8 @@ uv run python -m src.pdf_agent --envfile .env.local
 
 ```mermaid
 flowchart LR
-    START((START)) --> load["load_pdfs<br/>(list PDF files)"]
+    START((START)) --> extract["extract_config_from_prompt<br/>(NLP extraction)"]
+    extract --> load["load_pdfs<br/>(list PDF files)"]
     load --> convert["convert_pdfs<br/>(docling conversion)"]
     convert --> chunk["chunk_documents<br/>(split + overlap)"]
     chunk --> embed["generate_embeddings<br/>(embedding API call)"]
@@ -90,6 +93,10 @@ flowchart LR
 classDiagram
     class PDFProcessorState {
         <<TypedDict>>
+        +NotRequired[str] user_prompt
+        +NotRequired[str] llm_model
+        +NotRequired[str] base_url
+        +NotRequired[str] api_key
         +str folder_path
         +str embedding_api_key
         +str embedding_base_url
@@ -99,18 +106,13 @@ classDiagram
         +NotRequired[Literal["fixed","hybrid"]] chunking_strategy
         +NotRequired[int] chunk_size
         +NotRequired[int] chunk_overlap
-        +list[str] pdf_files
         +list[dict] documents
-        +list[list[float] | None] embeddings
-        +NotRequired[str] system_prompt
-        +NotRequired[str] llm_model
-        +NotRequired[str] base_url
-        +NotRequired[str] api_key
-        +NotRequired[str] user_prompt
         +NotRequired[str] vlm_api_url
         +NotRequired[dict] vlm_api_headers
         +NotRequired[dict] vlm_api_params
         +NotRequired[str] vlm_preset
+        +list[str] pdf_files
+        +list[list[float] | None] embeddings
     }
 
     class pdf_agent {
@@ -123,6 +125,7 @@ classDiagram
         +convert_pdfs(PDFProcessorState) dict
         +chunk_documents(PDFProcessorState) dict
         +generate_embeddings(PDFProcessorState) dict
+        +extract_config_from_prompt(PDFProcessorState) dict
     }
 
     class agent_settings {
@@ -130,6 +133,15 @@ classDiagram
         +_str_setting(key, default) str
         +_int_setting(key, default) int
         +_strip_or_none(key) str | None
+    }
+
+    class prompt_extraction {
+        +extract_config_from_prompt(prompt, model, url, key) dict
+        +merge_overrides(state, overrides) PDFProcessorState
+    }
+
+    class extractor_prompt {
+    +render() str
     }
 
     class json_parse {
@@ -140,7 +152,7 @@ classDiagram
     pdf_agent --> graph_nodes : adds nodes to graph
     pdf_agent --> PDFProcessorState : operates on
     graph_nodes --> PDFProcessorState : updates
-    pdf_agent --> agent_settings : reads settings
+    graph_nodes <-- prompt_extraction : uses
     agent_settings ..|> json_parse : uses helper
     graph_nodes <-- pdf_conversion : convert_pdf_paths_to_documents
     graph_nodes <-- pdf_paths : list_pdf_paths
@@ -150,9 +162,11 @@ classDiagram
 
 ### Module Structure
 
-- **Entry point** (`src/pdf_agent.py`): `StateGraph(PDFProcessorState)` wired as `load_pdfs → convert_pdfs → chunk_documents → generate_embeddings` → `END`. Public function `process_pdfs(agent_settings)` runs the compiled graph.
-- **State** (`src/graph/graph_state.py`): `PDFProcessorState` TypedDict with embedding settings, pipeline config, discovered files, documents, and embeddings.
-- **Nodes** (`src/graph/graph_nodes.py`): four callables — `load_pdfs`, `convert_pdfs`, `chunk_documents`, `generate_embeddings` — each returning a dict that merges into state.
+- **Entry point** (`src/pdf_agent.py`): `StateGraph(PDFProcessorState)` wired as `extract_config_from_prompt → load_pdfs → convert_pdfs → chunk_documents → generate_embeddings` → `END`. Public function `process_pdfs(agent_settings)` runs the compiled graph.
+- **State** (`src/graph/graph_state.py`): `PDFProcessorState` TypedDict with LLM settings (user_prompt, llm_model, base_url, api_key), embedding settings, pipeline config, discovered files, documents, and embeddings.
+- **Nodes** (`src/graph/graph_nodes.py`): five callables — `load_pdfs`, `convert_pdfs`, `chunk_documents`, `generate_embeddings`, `extract_config_from_prompt` — each returning a dict that merges into state.
+- **NLP Extraction** (`src/graph/prompt_extraction.py`): `extract_config_from_prompt()` sends a natural language user prompt to an LLM to extract config overrides; `merge_overrides()` applies the extracted values to state.
+- **Extractor Prompt** (`src/graph/prompts/extractor.py`): System prompt for the NLP extractor, defines all 16 configurable keys the LLM can extract.
 - **Helpers**:
   - `src/graph/pdf_paths.py`: `list_pdf_paths()` — glob `*.pdf` under a folder.
   - `src/graph/pdf_conversion.py`: `convert_pdf_paths_to_documents()` — standard docling or VLM pipeline with caching.
@@ -163,10 +177,11 @@ classDiagram
 
 ## Workflow
 
-1. **Load PDFs** (`src/graph/pdf_paths.py`): Discover `*.pdf` files in `FOLDER_PATH`.
-2. **Convert PDFs** (`src/graph/pdf_conversion.py`): Each file becomes a record with `content` (Markdown text), `docling_document`, and `metadata` (`file_path`, `file_name`, `page_count`, `title`, `conversion_pipeline`). Supports `standard` (default) or `vlm` pipelines. Per-file failures are printed; successful files are still returned.
-3. **Chunk documents** (`src/graph/chunking.py`): Splits documents using the `CHUNKING_STRATEGY` — `fixed` uses character-based splitting with `CHUNK_SIZE`/`CHUNK_OVERLAP`; `hybrid` uses docling's `HybridChunker`. Each chunk record extends `metadata` with `chunk_index` and `chunk_count`.
-4. **Generate embeddings** (`src/graph/embeddings.py`): One embedding vector per chunk via `EMBEDDING_MODEL`; per-chunk API errors print and yield `None` at that index.
+1. **Extract Config** (`src/graph/prompt_extraction.py`): If a `user_prompt` is provided (via CLI `--user_prompt` or the `user_prompt` state field), an LLM analyzes it to extract and override configuration parameters. Unextractable parameters retain their `.env` defaults.
+2. **Load PDFs** (`src/graph/pdf_paths.py`): Discover `*.pdf` files in `FOLDER_PATH`.
+3. **Convert PDFs** (`src/graph/pdf_conversion.py`): Each file becomes a record with `content` (Markdown text), `docling_document`, and `metadata` (`file_path`, `file_name`, `page_count`, `title`, `conversion_pipeline`). Supports `standard` (default) or `vlm` pipelines. Per-file failures are printed; successful files are still returned.
+4. **Chunk documents** (`src/graph/chunking.py`): Splits documents using the `CHUNKING_STRATEGY` — `fixed` uses character-based splitting with `CHUNK_SIZE`/`CHUNK_OVERLAP`; `hybrid` uses docling's `HybridChunker`. Each chunk record extends `metadata` with `chunk_index` and `chunk_count`.
+5. **Generate embeddings** (`src/graph/embeddings.py`): One embedding vector per chunk via `EMBEDDING_MODEL`; per-chunk API errors print and yield `None` at that index.
 
 ## Dependencies
 
