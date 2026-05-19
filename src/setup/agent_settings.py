@@ -51,34 +51,38 @@ def load_environment_variables(envfile: str) -> dict[str, Any]:
     e_file = Path(envfile)
     if not e_file.exists():
         raise FileNotFoundError(f"Environment file {e_file} not found")
-    load_dotenv(e_file) # load the environment variables
+    load_dotenv(e_file)  # load the environment variables
     return _get_settings_from_environment()
+
 
 # get the settings
 def _get_settings_from_environment():
     settings = {
-        "system_prompt": _str_setting("SYSTEM_PROMPT", ""),
         "llm_model": _str_setting("LLM_MODEL", "gpt-4o-mini"),
         "base_url": _str_setting("BASE_URL", "https://api.openai.com/v1"),
         "api_key": _str_setting("API_KEY", "your-api-key-here"),
         "folder_path": _str_setting("FOLDER_PATH", "./pdfs"),
         "embedding_model": _str_setting("EMBEDDING_MODEL", "text-embedding-ada-002"),
         "embedding_dimensions": _int_setting("EMBEDDING_DIMENSIONS", 1536),
-        "embedding_base_url": _str_setting("EMBEDDING_BASE_URL", "https://api.openai.com/v1"),
+        "embedding_base_url": _str_setting(
+            "EMBEDDING_BASE_URL", "https://api.openai.com/v1"
+        ),
         "embedding_api_key": _str_setting("EMBEDDING_API_KEY", "your-api-key-here"),
         "conversion_pipeline": _str_setting("CONVERSION_PIPELINE", "standard"),
         "chunking_strategy": _str_setting("CHUNKING_STRATEGY", "fixed"),
         "chunk_size": _int_setting("CHUNK_SIZE", 1000),
         "chunk_overlap": _int_setting("CHUNK_OVERLAP", 100),
         "vlm_api_url": _str_setting("VLM_API_URL", "https://api.openai.com/v1"),
-        "vlm_api_headers": _parse_json_object_str(_str_setting("VLM_API_HEADERS", "{}")),
+        "vlm_api_headers": _parse_json_object_str(
+            _str_setting("VLM_API_HEADERS", "{}")
+        ),
         "vlm_api_params": _parse_json_object_str(_str_setting("VLM_API_PARAMS", "{}")),
         "vlm_preset": _str_setting("VLM_PRESET", "smoldocling"),
     }
     return settings
 
+
 # export the settings
 __all__ = [
     "load_environment_variables",
 ]
-

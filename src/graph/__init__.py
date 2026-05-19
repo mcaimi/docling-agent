@@ -4,7 +4,7 @@
 # import the graph state
 try:
     from .graph_state import PDFProcessorState
-    from .graph_nodes import load_pdfs, convert_pdfs, chunk_documents, generate_embeddings
+    from .graph_nodes import load_pdfs, convert_pdfs, chunk_documents, generate_embeddings, extract_config_from_prompt
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
 
@@ -15,4 +15,5 @@ __all__ = [
     "convert_pdfs",
     "chunk_documents",
     "generate_embeddings",
+    "extract_config_from_prompt",
 ]

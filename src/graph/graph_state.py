@@ -5,12 +5,12 @@
 # import typing
 from typing import Any, Literal, NotRequired, TypedDict
 
+
 # define the state schema for the PDF processor
 # this tracks the state of the agent workflow
 class PDFProcessorState(TypedDict):
     # LLM settings for optional preprocessing
     user_prompt: NotRequired[str]
-    system_prompt: NotRequired[str]
     llm_model: NotRequired[str]
     base_url: NotRequired[str]
     api_key: NotRequired[str]
@@ -34,7 +34,7 @@ class PDFProcessorState(TypedDict):
 
     # chunked documents
     documents: list[dict[str, Any]]
-    
+
     # VLM pipeline settings
     vlm_api_url: NotRequired[str]
     vlm_api_headers: NotRequired[dict[str, str]]
@@ -43,9 +43,10 @@ class PDFProcessorState(TypedDict):
 
     # input
     pdf_files: list[str]
-    
+
     # output
     embeddings: list[list[float] | None]
+
 
 # export the state schema
 __all__ = ["PDFProcessorState"]
