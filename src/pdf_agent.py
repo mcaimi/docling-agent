@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """LangGraph compile-time wiring and public entrypoints for the PDF workflow."""
 
-from typing import Literal
+from typing import Any
+from argparse import ArgumentParser
 
 # import langgraph
 try:
@@ -11,8 +12,7 @@ except ImportError as e:
 
 # import the agent settings
 try:
-    from .setup import agent_settings
-    from .utils import _parse_json_object_str
+    from .setup import load_environment_variables
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
 
@@ -50,56 +50,45 @@ def create_pdf_processor_graph():
 
 # process documents
 def process_pdfs(
-    folder_path: str | None = None,
-    *,
-    conversion_pipeline: Literal["standard", "vlm"] | None = None,
-    chunking_strategy: Literal["fixed", "hybrid"] | None = None,
+    agent_settings: dict[str, Any],
 ) -> PDFProcessorState:
     """Run the compiled graph on ``folder_path`` (or the configured default)."""
     workflow = create_pdf_processor_graph()
 
     initial_state: PDFProcessorState = {
-        "folder_path": folder_path,
-        "api_key": agent_settings.EMBEDDING_API_KEY or agent_settings.OPENAI_API_KEY,
-        "chunk_size": agent_settings.CHUNK_SIZE,
-        "chunk_overlap": agent_settings.CHUNK_OVERLAP,
-        "chunking_strategy": agent_settings.DOCLING_CHUNKING_STRATEGY,
-        "vlm_api_url": agent_settings.DOCLING_VLM_API_URL_ENV,
-        "conversion_pipeline": agent_settings.DOCLING_PDF_PIPELINE_ENV,
-        "embedding_model": agent_settings.EMBEDDING_MODEL,
-        "connection_params": {
-            "api_key": agent_settings.EMBEDDING_API_KEY
-            or agent_settings.OPENAI_API_KEY,
-            "base_url": agent_settings.EMBEDDING_BASE_URL,
-        },
-        "vlm_api_headers": _parse_json_object_str(
-            agent_settings.DOCLING_VLM_API_HEADERS_ENV
-        ),
-        "vlm_api_params": _parse_json_object_str(
-            agent_settings.DOCLING_VLM_API_PARAMS_ENV
-        ),
-        "vlm_preset": agent_settings.DOCLING_VLM_PRESET_ENV,
-        "pdf_files": [],
-        "documents": [],
-        "embeddings": [],
+        **agent_settings,
     }
-    if conversion_pipeline is not None:
-        initial_state["conversion_pipeline"] = conversion_pipeline
-
-    if chunking_strategy is not None:
-        initial_state["chunking_strategy"] = chunking_strategy
 
     return workflow.invoke(initial_state)
 
+# parse command line arguments
+def parse_arguments():
+    parser = ArgumentParser(description="PDF processing agent")
+    parser.add_argument(
+        "--envfile", 
+        type=str, 
+        default=".env", 
+        help="Environment file to use as configuration."
+    )
+    
+    # return the parsed arguments
+    return parser.parse_args()
 
 # main entrypoint
 if __name__ == "__main__":
-    folder_path = agent_settings.PDF_FOLDER_PATH
+    # parse command line arguments
+    args = parse_arguments()
+    envfile = args.envfile
 
-    print(f"Processing PDFs in folder: {folder_path}")
+    # load environment variables
+    try:
+        agent_settings = load_environment_variables(envfile)
+    except Exception as e:
+        print(f"Error loading environment variables: {str(e)}")
+        exit(1)
 
     try:
-        result = process_pdfs(folder_path)
+        result = process_pdfs(agent_settings)
         print("PDF processing completed successfully")
         print(f"Total chunks processed: {len(result['documents'])}")
         print(f"Total embeddings generated: {len(result['embeddings'])}")

@@ -1,72 +1,75 @@
 # PDF Processing Agent
 
-A multi-step workflow built with **LangGraph** that processes PDF files using **docling** for conversion and an **OpenAI-compatible** HTTP API for embeddings.
-
-## Requirements
-
-- Python **3.11+**
-- [uv](https://docs.astral.sh/uv/) (recommended) or another PEP 517 installer
-
-## Features
-
-- Load PDF files from a specified folder
-- Convert PDFs to text using docling
-- Chunk documents into smaller parts (size and overlap are configured in `src/config.py`)
-- Generate embeddings for each chunk via an OpenAI-compatible embeddings endpoint
-
-## Installation
-
-```bash
-uv sync
-```
+LangGraph workflow that discovers PDFs, converts them with **docling**, chunks text with overlap, and requests **OpenAI-compatible** embeddings per chunk.
 
 ## Setup
 
-1. Configure environment variables (for example in a `.env` file in the project root). The embedding client reads:
+1. **Python 3.11+** and [uv](https://docs.astral.sh/uv/) (recommended).
 
-   - `EMBEDDING_API_KEY`: API key for the embedding endpoint (or `OPENAI_API_KEY` as a fallback)
-   - `EMBEDDING_BASE_URL`: Base URL of the OpenAI-compatible embedding API (optional; omit for the default OpenAI host)
-   - `PDF_FOLDER_PATH`: Directory containing PDF files to process (optional; defaults to `./pdfs` in `src/config.py`)
+2. Install dependencies:
 
-   If you use a `.env` file, load it from your own script (for example `from dotenv import load_dotenv; load_dotenv()`), or export the variables in your shell before running.
+   ```bash
+   uv sync
+   ```
 
-2. Put PDFs in that folder (or point `PDF_FOLDER_PATH` at an existing folder).
+3. **Environment**: Create a `.env` file in the project root (see `.env` for the full list of configurable variables). All settings can also be overridden via shell environment variables.
 
 ## Usage
 
 ```python
+from src.setup import load_environment_variables
 from src.pdf_agent import process_pdfs
 
-result = process_pdfs("./path/to/pdf/folder")
-# result is a dict (TypedDict) with keys:
-# folder_path, pdf_files, documents, embeddings
+agent_settings = load_environment_variables(".env")
+# or pass a config dict directly:
+# agent_settings = {
+#     "folder_path": "./pdfs",
+#     "embedding_model": "text-embedding-ada-002",
+#     "embedding_dimensions": 1536,
+#     "embedding_base_url": "https://api.openai.com/v1",
+#     "embedding_api_key": "your-api-key-here",
+#     "conversion_pipeline": "standard",  # or "vlm"
+#     "chunking_strategy": "fixed",        # or "hybrid"
+#     "chunk_size": 1000,
+#     "chunk_overlap": 100,
+# }
+
+result = process_pdfs(agent_settings)
+# result is PDFProcessorState (TypedDict) with keys:
+# folder_path, pdf_files, documents, embeddings, ...
 chunks = result["documents"]
-vectors = result["embeddings"]
+vectors = result["embeddings"]   # list[list[float] | None]
 ```
 
-Run the bundled entrypoint (uses `PDF_FOLDER_PATH` from the environment or the default folder):
+CLI (uses `FOLDER_PATH` and other variables from the `.env` file or the configured defaults):
 
 ```bash
 uv run python -m src.pdf_agent
+# Custom env file:
+uv run python -m src.pdf_agent --envfile .env.local
 ```
 
-## Workflow
+## Environment Variables
 
-The LangGraph pipeline runs these steps in order:
-
-1. **Load PDFs**: Discover `*.pdf` files in the folder
-2. **Convert PDFs**: Turn each file into text (and basic metadata) with docling
-3. **Chunk documents**: Split text into overlapping chunks
-4. **Generate embeddings**: Call the embeddings API for each chunk (requires a valid API key when this step runs)
-
-## Dependencies
-
-Declared in `pyproject.toml`:
-
-- `langgraph` (1.2+)
-- `docling` (2.93+)
-- `openai` (1.14+)
-- `python-dotenv` (1.2+)
+| Variable | Default | Role |
+|---|---|---|
+| `FOLDER_PATH` | `./pdfs` | Directory containing PDF files to process |
+| `EMBEDDING_API_KEY` | `your-api-key-here` | API key for the embedding endpoint |
+| `EMBEDDING_BASE_URL` | `https://api.openai.com/v1` | Base URL of the OpenAI-compatible API |
+| `EMBEDDING_MODEL` | `text-embedding-ada-002` | Model id passed to the embeddings API |
+| `EMBEDDING_DIMENSIONS` | `1536` | Expected vector size for the chosen model |
+| `CHUNK_SIZE` | `1000` | Characters per fixed-size chunk |
+| `CHUNK_OVERLAP` | `100` | Overlap between consecutive fixed-size chunks |
+| `CONVERSION_PIPELINE` | `standard` | `standard` (docling pipeline) or `vlm` (VLM pipeline) |
+| `CHUNKING_STRATEGY` | `fixed` | `fixed` (character-based) or `hybrid` (document-aware) |
+| `SYSTEM_PROMPT` | `""` | System prompt for optional LLM preprocessing |
+| `LLM_MODEL` | `gpt-4o-mini` | LLM model for optional preprocessing |
+| `BASE_URL` | `https://api.openai.com/v1` | Base URL for the LLM |
+| `API_KEY` | `your-api-key-here` | API key for the LLM |
+| `VLM_API_URL` | `https://api.openai.com/v1` | Remote VLM endpoint URL (required when `CONVERSION_PIPELINE=vlm`) |
+| `VLM_API_HEADERS` | `{}` | JSON object of headers for the VLM API |
+| `VLM_API_PARAMS` | `{}` | JSON object of params for the VLM API |
+| `VLM_PRESET` | `smoldocling` | Preset name for the VLM conversion |
 
 ## Architecture
 
@@ -81,22 +84,29 @@ flowchart LR
     embed --> END((END))
 ```
 
-### Class Diagram
+### State Schema
 
 ```mermaid
 classDiagram
     class PDFProcessorState {
         <<TypedDict>>
         +str folder_path
-        +str api_key
+        +str embedding_api_key
+        +str embedding_base_url
         +str embedding_model
-        +dict connection_params
+        +NotRequired[int] embedding_dimensions
+        +NotRequired[Literal["standard","vlm"]] conversion_pipeline
+        +NotRequired[Literal["fixed","hybrid"]] chunking_strategy
         +NotRequired[int] chunk_size
         +NotRequired[int] chunk_overlap
         +list[str] pdf_files
         +list[dict] documents
-        +list[float | None] embeddings
-        +NotRequired[str] conversion_pipeline
+        +list[list[float] | None] embeddings
+        +NotRequired[str] system_prompt
+        +NotRequired[str] llm_model
+        +NotRequired[str] base_url
+        +NotRequired[str] api_key
+        +NotRequired[str] user_prompt
         +NotRequired[str] vlm_api_url
         +NotRequired[dict] vlm_api_headers
         +NotRequired[dict] vlm_api_params
@@ -105,7 +115,7 @@ classDiagram
 
     class pdf_agent {
         +create_pdf_processor_graph() CompiledGraph
-        +process_pdfs(folder_path, conversion_pipeline) PDFProcessorState
+        +process_pdfs(agent_settings) PDFProcessorState
     }
 
     class graph_nodes {
@@ -116,52 +126,56 @@ classDiagram
     }
 
     class agent_settings {
-        +str EMBEDDING_MODEL
-        +int EMBEDDING_DIMENSIONS
-        +int CHUNK_SIZE
-        +int CHUNK_OVERLAP
-        +str PDF_FOLDER_PATH
-        +str EMBEDDING_BASE_URL
-        +str EMBEDDING_API_KEY
-        +str DOCLING_PDF_PIPELINE_ENV
-        +str DOCLING_VLM_API_URL_ENV
-        ...
+        +load_environment_variables(envfile) dict
+        +_str_setting(key, default) str
+        +_int_setting(key, default) int
+        +_strip_or_none(key) str | None
     }
 
-    class config {
-        +str EMBEDDING_MODEL "text-embedding-ada-002"
-        +int EMBEDDING_DIMENSIONS 1536
-        +int CHUNK_SIZE 1000
-        +int CHUNK_OVERLAP 100
-        +str PDF_FOLDER_PATH "./pdfs"
-        ...
-    }
-
-    class _parse_json_object_str {
-        +str json_str ~ dict | None
+    class json_parse {
+        +_parse_json_object_str(json_str) dict
+        +_parse_json_object_env(var_name) dict
     }
 
     pdf_agent --> graph_nodes : adds nodes to graph
     pdf_agent --> PDFProcessorState : operates on
     graph_nodes --> PDFProcessorState : updates
     pdf_agent --> agent_settings : reads settings
-    agent_settings ..|> config : overrides defaults
-    pdf_agent --> _parse_json_object_str : uses helper
+    agent_settings ..|> json_parse : uses helper
     graph_nodes <-- pdf_conversion : convert_pdf_paths_to_documents
     graph_nodes <-- pdf_paths : list_pdf_paths
-    graph_nodes <-- chunking : chunk_document_records
-    graph_nodes <-- embeddings : embed_texts
+    graph_nodes <-- chunking : chunk_document_records / chunk_document_records_hybrid
+    graph_nodes <-- embeddings : embed_texts / get_embedding_client
 ```
 
-<!-- existing dependency section for completeness -->
+### Module Structure
+
+- **Entry point** (`src/pdf_agent.py`): `StateGraph(PDFProcessorState)` wired as `load_pdfs → convert_pdfs → chunk_documents → generate_embeddings` → `END`. Public function `process_pdfs(agent_settings)` runs the compiled graph.
+- **State** (`src/graph/graph_state.py`): `PDFProcessorState` TypedDict with embedding settings, pipeline config, discovered files, documents, and embeddings.
+- **Nodes** (`src/graph/graph_nodes.py`): four callables — `load_pdfs`, `convert_pdfs`, `chunk_documents`, `generate_embeddings` — each returning a dict that merges into state.
+- **Helpers**:
+  - `src/graph/pdf_paths.py`: `list_pdf_paths()` — glob `*.pdf` under a folder.
+  - `src/graph/pdf_conversion.py`: `convert_pdf_paths_to_documents()` — standard docling or VLM pipeline with caching.
+  - `src/graph/chunking.py`: `chunk_document_records()` (fixed-size) and `chunk_document_records_hybrid()` (docling `HybridChunker`).
+  - `src/graph/embeddings.py`: `embed_texts()` (per-chunk with error handling) and singleton `get_embedding_client()`.
+- **Configuration** (`src/setup/agent_settings.py`): `load_environment_variables(envfile)` — `.env` via `python-dotenv`, resolved with `_str_setting`, `_int_setting`, `_strip_or_none`.
+- **Utils** (`src/utils/json_parse.py`): `_parse_json_object_str` and `_parse_json_object_env` helpers for parsing JSON env var strings into dicts (used for VLM headers/params).
+
+## Workflow
+
+1. **Load PDFs** (`src/graph/pdf_paths.py`): Discover `*.pdf` files in `FOLDER_PATH`.
+2. **Convert PDFs** (`src/graph/pdf_conversion.py`): Each file becomes a record with `content` (Markdown text), `docling_document`, and `metadata` (`file_path`, `file_name`, `page_count`, `title`, `conversion_pipeline`). Supports `standard` (default) or `vlm` pipelines. Per-file failures are printed; successful files are still returned.
+3. **Chunk documents** (`src/graph/chunking.py`): Splits documents using the `CHUNKING_STRATEGY` — `fixed` uses character-based splitting with `CHUNK_SIZE`/`CHUNK_OVERLAP`; `hybrid` uses docling's `HybridChunker`. Each chunk record extends `metadata` with `chunk_index` and `chunk_count`.
+4. **Generate embeddings** (`src/graph/embeddings.py`): One embedding vector per chunk via `EMBEDDING_MODEL`; per-chunk API errors print and yield `None` at that index.
+
 ## Dependencies
 
 Declared in `pyproject.toml`:
 
-- `langgraph` (1.2+)
-- `docling` (2.93+)
-- `openai` (1.14+)
-- `python-dotenv` (1.2+)
+- `docling>=2.93.0`
+- `langgraph>=1.2.0`
+- `openai>=2.30.0`
+- `python-dotenv>=1.2.2`
 
 ## License
 

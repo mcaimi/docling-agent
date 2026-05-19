@@ -13,16 +13,10 @@ _embedding_client: OpenAI = None
 # get the embedding client
 # uses the connection params to configure the client
 # connection settings are stored in the graph state
-def get_embedding_client(connection_params: dict) -> OpenAI:
+def get_embedding_client(base_url: str, api_key: str) -> OpenAI:
     """Return a singleton OpenAI client configured from agent settings (.env + config defaults)."""
     global _embedding_client
     if _embedding_client is None:
-        api_key = connection_params["api_key"]
-        base_url = connection_params["base_url"]
-        if not api_key:
-            raise ValueError(
-                "Set EMBEDDING_API_KEY (or OPENAI_API_KEY) for the embedding endpoint."
-            )
         _embedding_client = OpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -33,7 +27,7 @@ def get_embedding_client(connection_params: dict) -> OpenAI:
 # embed the texts
 # uses the embedding client to generate embeddings for the texts
 # returns a list of embeddings
-def embed_texts(texts: list[str], model: str, connection_params: dict) -> list[list[float] | None]:
+def embed_texts(texts: list[str], model: str, base_url: str, api_key: str) -> list[list[float] | None]:
     """
     Request one embedding per string. On API errors for an item, that position is
     ``None`` and the error is printed.
@@ -41,7 +35,7 @@ def embed_texts(texts: list[str], model: str, connection_params: dict) -> list[l
     if not texts:
         return []
 
-    client = get_embedding_client(connection_params)
+    client = get_embedding_client(base_url, api_key)
     embeddings: list[list[float] | None] = []
 
     for content in texts:

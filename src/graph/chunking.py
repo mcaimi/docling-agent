@@ -72,28 +72,10 @@ def chunk_document_records_hybrid(
         for i, chunk in enumerate(chunks):
             # contextualize chunk for content storage
             chunk_content = chunker.contextualize(chunk=chunk)
-            # fill metadata
-            c_metadata = {
-                "name": chunk.meta.origin.filename,
-                "uri": chunk.meta.origin.uri,
-                "headings": chunk.meta.headings,
-                "captions": chunk.meta.captions,
-                "mimetype": chunk.meta.origin.mimetype,
-                "document_id": f"{chunk.meta.origin.filename}_{chunk.meta.origin.binary_hash}",
-                "chunk_id": f"{chunk.meta.origin.filename}_{chunk.meta.origin.binary_hash}_chunk_{i}",
-            }
-            # fill chunk metadata
-            chunk_metadata = {
-                "document_id": f"{chunk.meta.origin.filename}_{chunk.meta.origin.binary_hash}",
-                "chunk_id": f"{chunk.meta.origin.filename}_{chunk.meta.origin.binary_hash}_chunk_{i}",
-                "source": c_metadata.get("uri") or c_metadata.get("name"),
-            }
 
             chunked_docs.append(
                 {
-                    "chunk_id": f"{chunk.meta.origin.filename}_{chunk.meta.origin.binary_hash}_chunk_{i}",
                     "content": chunk_content,
-                    "chunk_metadata": chunk_metadata,
                     "metadata": {
                         **metadata,
                         "chunk_index": i,
