@@ -5,7 +5,6 @@ from typing import Any
 
 try:
     from openai import OpenAI
-    from .graph_state import PDFProcessorState
     from .prompts.extractor import render as _system_message_render
     from .prompts.extractor import _CONFIG_KEYS
 except ImportError as e:
@@ -74,7 +73,7 @@ def extract_config_from_prompt(
 
 # merge state dictionaries
 # update state with overrides extracted by the LLM if any
-def merge_overrides(state: PDFProcessorState, overrides: dict) -> PDFProcessorState:
+def merge_overrides(state: dict, overrides: dict) -> dict:
     # apply overrides
     for k in overrides.keys():
         if k in state.keys():
