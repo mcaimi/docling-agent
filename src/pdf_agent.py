@@ -11,11 +11,7 @@ except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
 
 try:
-    from .graph import (
-        extract_config_from_prompt,
-        list_pdf_paths,
-        merge_overrides
-    )
+    from .graph import extract_config_from_prompt, list_pdf_paths, merge_overrides
     from .graph.document_pipeline import document_workflow
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
@@ -44,7 +40,7 @@ def process_pdfs(
     paths = list_pdf_paths(agent_settings.get("folder_path"))
 
     # 3. Determine concurrency level (if not specified, use the number of CPUs available, if unable to determine use 1)
-    max_conc = agent_settings.get("max_concurrency") or os.cpu_count() or 1
+    max_conc = agent_settings.get("max_concurrency")
 
     # 4. Build input for the pipeline: list of {"pdf_path", "config"} dicts
     input_data = [{"pdf_path": p, "config": agent_settings} for p in paths]
@@ -67,7 +63,11 @@ def process_pdfs(
         "documents": documents,
         "embeddings": embeddings,
         "error_reports": errors,
-        **{k: v for k, v in agent_settings.items() if k not in ("documents", "embeddings")},
+        **{
+            k: v
+            for k, v in agent_settings.items()
+            if k not in ("documents", "embeddings")
+        },
     }
 
 

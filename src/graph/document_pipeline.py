@@ -209,6 +209,17 @@ def embed_doc(
     return {"chunks": chunks, "embeddings": vectors, "path": result["path"], "error": None, "config": config}
 
 
+def _max_concurrency_from_config(config: RunnableConfig) -> int:
+    """Read and validate max_concurrency from RunnableConfig.configurable."""
+    raw = (config or {}).get("configurable", {}).get("max_concurrency")
+    if raw is None:
+        return os.cpu_count() or 1
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return os.cpu_count() or 1
+
+
 @entrypoint()
 def document_workflow(
     input_data: list[dict],
@@ -217,12 +228,16 @@ def document_workflow(
     """
     Run the full convert->chunk->embed pipeline for each document in parallel.
 
+    Parallelism is capped by ``config["configurable"]["max_concurrency"]`` (default:
+    CPU count). Documents are processed in batches; each batch runs convert, chunk,
+    and embed for up to that many PDFs before the next batch starts.
+
     Parameters
     ----------
     input_data : list[dict]
         List of dicts, each with {"pdf_path": str, "config": dict}.
     config : RunnableConfig
-        Injectable config from langgraph (unused here; config is passed through input_data).
+        Run config; ``configurable.max_concurrency`` limits parallel PDF pipelines.
 
     Returns
     -------
@@ -230,13 +245,19 @@ def document_workflow(
         One result dict per input, with "chunks", "embeddings", "path",
         "error", and "config".
     """
-    converted = [
-        convert_doc({
-            "pdf_path": i.get("pdf_path"),
-            "config": i.get("config")
-        })
-        for i in input_data
-    ]
-    chunked = [chunk_doc({"converted": t}) for t in converted]
-    embedded = [embed_doc({"chunked": t}) for t in chunked]
-    return [t.result() for t in embedded]
+    max_conc = _max_concurrency_from_config(config)
+    results: list[dict] = []
+    print(f" -> Running document workflow with max concurrency: {max_conc}")
+
+    for start in range(0, len(input_data), max_conc):
+        batch = input_data[start : start + max_conc]
+        converted = [
+            convert_doc({"pdf_path": i.get("pdf_path"), "config": i.get("config")})
+            for i in batch
+        ]
+        chunked = [chunk_doc({"converted": t}) for t in converted]
+        embedded = [embed_doc({"chunked": t}) for t in chunked]
+        results.extend(t.result() for t in embedded)
+
+    print(f" -> Document workflow completed with {len(results)} results")
+    return results
