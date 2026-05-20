@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""LangGraph compile-time wiring and public entrypoints for the PDF workflow."""
+"""LangGraph compile-time wiring and public entrypoints for the document processing workflow."""
 
 import sys
 from typing import Any
@@ -11,16 +11,16 @@ except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
 
 try:
-    from .graph import extract_config_from_prompt, list_pdf_paths, merge_overrides
+    from .graph import extract_config_from_prompt, list_document_paths, merge_overrides
     from .graph.document_pipeline import document_workflow
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
 
 
-def process_pdfs(
+def process_documents(
     agent_settings: dict[str, Any],
 ) -> dict[str, Any]:
-    """Run the PDF processing workflow on all PDFs in folder_path with per-document parallelism."""
+    """Run the document processing workflow on all documents in folder_path with per-document parallelism."""
     # 1. NLP extraction (synchronous)
     user_prompt = agent_settings.get("user_prompt", "")
     # process the user prompt if requested
@@ -36,14 +36,14 @@ def process_pdfs(
     # update the graph state
     agent_settings = merge_overrides(agent_settings, filtered)
 
-    # 2. List PDFs
-    paths = list_pdf_paths(agent_settings.get("folder_path"))
+    # 2. List documents
+    paths = list_document_paths(agent_settings.get("folder_path"))
 
     # 3. Determine concurrency level (if not specified, use the number of CPUs available, if unable to determine use 1)
     max_conc = agent_settings.get("max_concurrency")
 
-    # 4. Build input for the pipeline: list of {"pdf_path", "config"} dicts
-    input_data = [{"pdf_path": p, "config": agent_settings} for p in paths]
+    # 4. Build input for the pipeline: list of {"file_path", "config"} dicts
+    input_data = [{"file_path": p, "config": agent_settings} for p in paths]
 
     # 5. Run parallel pipeline
     result = document_workflow.invoke(
@@ -73,7 +73,7 @@ def process_pdfs(
 
 # parse command line arguments
 def parse_arguments():
-    parser = ArgumentParser(description="PDF processing agent")
+    parser = ArgumentParser(description="Document processing agent")
     parser.add_argument(
         "--envfile",
         type=str,
@@ -155,15 +155,15 @@ if __name__ == "__main__":
                             )
                             print(f"    NLP extracted overrides: {_filtered}")
 
-                    # Step 2: PDF discovery
-                    with mlflow.start_span("PDF discovery"):
-                        _paths = list_pdf_paths(agent_settings.get("folder_path"))
-                        mlflow.log_metric("pdf_count", len(_paths))
+                    # Step 2: document discovery
+                    with mlflow.start_span("document discovery"):
+                        _paths = list_document_paths(agent_settings.get("folder_path"))
+                        mlflow.log_metric("document_count", len(_paths))
 
                     # Step 3: Build input
                     _max_conc = agent_settings.get("max_concurrency")
                     _input_data = [
-                        {"pdf_path": p, "config": agent_settings} for p in _paths
+                        {"file_path": p, "config": agent_settings} for p in _paths
                     ]
 
                     # Step 4: Pipeline invoke
@@ -219,7 +219,7 @@ if __name__ == "__main__":
             sys.exit(-1)
     else:
         try:
-            result = process_pdfs(agent_settings)
+            result = process_documents(agent_settings)
             print("Document processing completed successfully")
             print(f"Total chunks processed: {len(result['documents'])}")
             print(f"Total embeddings generated: {len(result['embeddings'])}")
@@ -229,5 +229,5 @@ if __name__ == "__main__":
                 for e in errors:
                     print(f"  - {e['path']}: {e['error']}")
         except Exception as e:
-            print(f"Error processing PDFs: {str(e)}")
+            print(f"Error processing documents: {str(e)}")
             raise e

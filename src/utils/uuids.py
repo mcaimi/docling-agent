@@ -19,7 +19,7 @@ def is_valid_uuid(uuid: str) -> bool:
 # generate a random mlflow run name from current timestamp and a random uuid
 def generate_mlflow_run_name() -> str:
     """Generate a random MLflow run name from current timestamp and a random UUID."""
-    return f"docling_pdf_processing_{time.time()}_{generate_uuid()}"
+    return f"docling_document_processing_{time.time()}_{generate_uuid()}"
 
 # export the functions
 __all__ = [
