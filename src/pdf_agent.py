@@ -106,14 +106,19 @@ if __name__ == "__main__":
                 f" -> Tracing is enabled (enable_tracing={agent_settings.get('enable_tracing')})"
             )
             import mlflow
+            from .utils import generate_mlflow_run_name
 
-            mlflow.set_tracking_uri("http://localhost:5001")
-            mlflow.set_experiment("Docling Agent")
+            print(f" -> MLflow run name: {generate_mlflow_run_name()}")
+            print(f" -> MLflow tracking URI: {agent_settings.get('mlflow_tracking_uri')}")
+            print(f" -> MLflow experiment name: {agent_settings.get('mlflow_experiment_name')}")
+
+            mlflow.set_tracking_uri(agent_settings.get("mlflow_tracking_uri"))
+            mlflow.set_experiment(agent_settings.get("mlflow_experiment_name"))
             mlflow.langchain.autolog()
             mlflow.openai.autolog()
 
             # instrumented code path
-            with mlflow.start_run(run_name="docling_pdf_processing") as run:
+            with mlflow.start_run(run_name=generate_mlflow_run_name()) as run:
                 # Log all agent settings as params, filtering sensitive data
                 _sensitive = {"api_key", "embedding_api_key", "vlm_api_headers", "vlm_api_params"}
                 _sanitised = {
