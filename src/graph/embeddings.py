@@ -7,6 +7,18 @@ try:
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
 
+import os
+
+# check if tracing is enabled
+enable_tracing = int(os.getenv("ENABLE_TRACING", "0")) == 1
+
+if enable_tracing:
+    try:
+        import mlflow as _ml
+    except ImportError:
+        print("MLflow is not installed. Tracing is disabled.")
+        enable_tracing = False
+
 # define the embedding client (singleton)
 _embedding_client: OpenAI = None
 
@@ -37,6 +49,7 @@ def embed_texts(texts: list[str], model: str, base_url: str, api_key: str) -> li
 
     client = get_embedding_client(base_url, api_key)
     embeddings: list[list[float] | None] = []
+    embedding_dimensions: int | None = None
 
     for content in texts:
         try:
@@ -44,9 +57,21 @@ def embed_texts(texts: list[str], model: str, base_url: str, api_key: str) -> li
                 input=content,
                 model=model,
             )
-            embeddings.append(response.data[0].embedding)
+            _vec = response.data[0].embedding
+            embeddings.append(_vec)
+            if embedding_dimensions is None and _vec:
+                _dims = len(_vec)
         except Exception as e:
             print(f"Error generating embedding for content: {str(e)}")
             embeddings.append(None)
+
+    if enable_tracing:
+        with _ml.start_span("embed_texts"):
+            _ml.set_tag("model", model)
+            _ml.set_tag("text_count", len(texts))
+            if embedding_dimensions is not None:
+                _ml.set_tag("embedding_dimensions", _dims)
+            _ml.set_tag("success_count", sum(1 for e in embeddings if e is not None))
+            _ml.set_tag("failure_count", sum(1 for e in embeddings if e is None))
 
     return embeddings

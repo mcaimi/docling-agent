@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 """LangGraph compile-time wiring and public entrypoints for the PDF workflow."""
 
-import os
 from typing import Any
 from argparse import ArgumentParser
 
@@ -100,16 +99,118 @@ if __name__ == "__main__":
         print(f"Error loading environment variables: {str(e)}")
         exit(1)
 
-    try:
-        result = process_pdfs(agent_settings)
-        print("Document processing completed successfully")
-        print(f"Total chunks processed: {len(result['documents'])}")
-        print(f"Total embeddings generated: {len(result['embeddings'])}")
-        errors = result.get("error_reports", [])
-        if errors:
-            print(f"Files with errors: {len(errors)}")
-            for e in errors:
-                print(f"  - {e['path']}: {e['error']}")
-    except Exception as e:
-        print(f"Error processing PDFs: {str(e)}")
-        raise e
+    # enable tracing
+    if agent_settings.get("enable_tracing"):
+        try:
+            print(
+                f" -> Tracing is enabled (enable_tracing={agent_settings.get('enable_tracing')})"
+            )
+            import mlflow
+
+            mlflow.set_tracking_uri("http://localhost:5001")
+            mlflow.set_experiment("Docling Agent")
+            mlflow.langchain.autolog()
+            mlflow.openai.autolog()
+
+            # instrumented code path
+            with mlflow.start_run(run_name="docling_pdf_processing") as run:
+                # Log all agent settings as params, filtering sensitive data
+                _sensitive = {"api_key", "embedding_api_key", "vlm_api_headers", "vlm_api_params"}
+                _sanitised = {
+                    k: v for k, v in agent_settings.items() if k not in _sensitive
+                }
+                mlflow.log_params(_sanitised)
+                print(f"  MLflow Run ID: {run.info.run_id}")
+                mlflow.set_tag("nlp_extracted_keys", agent_settings.get("_nlp_extracted_keys", "none"))
+
+                # Step 1: NLP prompt extraction
+                with mlflow.start_span("NLP prompt extraction"):
+                    _user_prompt = agent_settings.get("user_prompt", "")
+                    _cfg: dict = {}
+                    if _user_prompt:
+                        _cfg = extract_config_from_prompt(
+                            _user_prompt,
+                            agent_settings.get("llm_model"),
+                            agent_settings.get("base_url"),
+                            agent_settings.get("api_key"),
+                        )
+                    _filtered = {k: v for k, v in _cfg.items() if v is not None}
+                    agent_settings = merge_overrides(agent_settings, _filtered)
+                    if _filtered:
+                        mlflow.set_tag("nlp_extracted_keys", ", ".join(sorted(_filtered.keys())))
+                        print(f"    NLP extracted overrides: {_filtered}")
+
+                # Step 2: PDF discovery
+                with mlflow.start_span("PDF discovery"):
+                    _paths = list_pdf_paths(agent_settings.get("folder_path"))
+                    mlflow.log_metric("pdf_count", len(_paths))
+
+                # Step 3: Build input
+                _max_conc = agent_settings.get("max_concurrency")
+                _input_data = [{"pdf_path": p, "config": agent_settings} for p in _paths]
+
+                # Step 4: Pipeline invoke
+                with mlflow.start_span("Parallel pipeline"):
+                    _result = document_workflow.invoke(
+                        _input_data,
+                        config={"configurable": {"max_concurrency": _max_conc}},
+                    )
+
+                # Step 5: Results aggregation
+                with mlflow.start_span("Results aggregation"):
+                    _docs, _embs, _errs = [], [], []
+                    for item in _result:
+                        _docs.extend(item["chunks"])
+                        _embs.extend(item["embeddings"])
+                        if item.get("error"):
+                            _errs.append({"path": item["path"], "error": item["error"]})
+
+                    _final_result = {
+                        "documents": _docs,
+                        "embeddings": _embs,
+                        "error_reports": _errs,
+                        **{
+                            k: v
+                            for k, v in agent_settings.items()
+                            if k not in ("documents", "embeddings")
+                        },
+                    }
+
+                    # Log metrics
+                    mlflow.log_metric("total_chunks", len(_docs))
+                    mlflow.log_metric("total_embeddings", len(_embs))
+                    mlflow.log_metric("error_count", len(_errs))
+                    mlflow.log_metric(
+                        "non_null_embeddings",
+                        sum(1 for e in _embs if e is not None),
+                    )
+
+                    # Log error reports as artifact
+                    if _errs:
+                        mlflow.log_dict(_errs, "error_reports.json")
+
+                    print("Document processing completed successfully")
+                    print(f"Total chunks processed: {len(_docs)}")
+                    print(f"Total embeddings generated: {len(_embs)}")
+                    if _errs:
+                        print(f"Files with errors: {len(_errs)}")
+                        for e in _errs:
+                            print(f"  - {e['path']}: {e['error']}")
+                result = _final_result
+        except ImportError as e:
+            print(f" X Cannot import mlflow: {e}. Auto Tracing Cannot Start.")
+            sys.exit(-1)
+    else:
+        try:
+            result = process_pdfs(agent_settings)
+            print("Document processing completed successfully")
+            print(f"Total chunks processed: {len(result['documents'])}")
+            print(f"Total embeddings generated: {len(result['embeddings'])}")
+            errors = result.get("error_reports", [])
+            if errors:
+                print(f"Files with errors: {len(errors)}")
+                for e in errors:
+                    print(f"  - {e['path']}: {e['error']}")
+        except Exception as e:
+            print(f"Error processing PDFs: {str(e)}")
+            raise e

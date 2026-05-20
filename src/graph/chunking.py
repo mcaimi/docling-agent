@@ -9,6 +9,17 @@ try:
 except ImportError as e:
     raise e
 
+import os
+
+# check if tracing is enabled
+enable_tracing = int(os.getenv("ENABLE_TRACING", "0")) == 1
+
+if enable_tracing:
+    try:
+        import mlflow as _ml
+    except ImportError:
+        print("MLflow is not installed. Tracing is disabled.")
+        enable_tracing = False
 
 # fixed-size chunker
 def chunk_document_records(
@@ -49,6 +60,12 @@ def chunk_document_records(
                 }
             )
 
+    if enable_tracing:
+        with _ml.start_span("chunk_fixed"):
+            _ml.set_tag("chunk_size", chunk_size)
+            _ml.set_tag("chunk_overlap", chunk_overlap)
+            _ml.set_tag("total_chunks", len(chunked_docs))
+
     return chunked_docs
 
 
@@ -84,5 +101,8 @@ def chunk_document_records_hybrid(
                 }
             )
 
-    # return chunked_docs
+    if enable_tracing:
+        with _ml.start_span("chunk_hybrid"):
+            _ml.set_tag("total_chunks", len(chunked_docs))
+
     return chunked_docs
