@@ -1,6 +1,6 @@
-# PDF Processing Agent
+# Docling Document Processing Agent
 
-LangGraph workflow that discovers PDFs, converts them in **parallel batches** with **docling**, chunks text with overlap, and requests **OpenAI-compatible** embeddings per chunk. Optional **MLflow** tracing records runs, spans, and metrics when enabled.
+LangGraph workflow that discovers documents (PDF, DOCX, XLSX, Markdown, HTML, LaTeX), converts them in **parallel batches** with **docling**, chunks text with overlap, and requests **OpenAI-compatible** embeddings per chunk. Optional **MLflow** tracing records runs, spans, and metrics when enabled.
 
 ## Setup
 
@@ -20,7 +20,7 @@ LangGraph workflow that discovers PDFs, converts them in **parallel batches** wi
 
 ```python
 from src.setup import load_environment_variables
-from src.pdf_agent import process_pdfs
+from src.docling_agent import process_documents
 
 agent_settings = load_environment_variables(".env")
 # or pass a config dict directly:
@@ -31,7 +31,7 @@ agent_settings = load_environment_variables(".env")
 #     "embedding_dimensions": 1536,
 #     "embedding_base_url": "https://api.openai.com/v1",
 #     "embedding_api_key": "your-api-key-here",
-#     "conversion_pipeline": "standard",  # or "vlm"
+#     "conversion_pipeline": "standard",  # or "vlm" (PDF only)
 #     "chunking_strategy": "fixed",        # or "hybrid"
 #     "chunk_size": 1000,
 #     "chunk_overlap": 100,
@@ -41,7 +41,7 @@ agent_settings = load_environment_variables(".env")
 #     "mlflow_experiment_name": "Docling Agent",
 # }
 
-result = process_pdfs(agent_settings)
+result = process_documents(agent_settings)
 # result includes resolved config keys plus:
 #   documents      — list of chunk records (content + metadata)
 #   embeddings     — list[list[float] | None], one per chunk
@@ -56,27 +56,27 @@ if result.get("error_reports"):
 CLI (uses `FOLDER_PATH` and other variables from the `.env` file or the configured defaults):
 
 ```bash
-uv run python -m src.pdf_agent
+uv run python -m src.docling_agent
 # Custom env file:
-uv run python -m src.pdf_agent --envfile .env.local
+uv run python -m src.docling_agent --envfile .env.local
 # User prompt for NLP extraction:
-uv run python -m src.pdf_agent --user_prompt "Use VLM pipeline and hybrid chunking"
+uv run python -m src.docling_agent --user_prompt "Use VLM pipeline and hybrid chunking"
 ```
 
-With `ENABLE_TRACING=1`, the CLI connects to `mlflow_tracking_uri`, uses `mlflow_experiment_name`, and starts a uniquely named run (`docling_pdf_processing_{timestamp}_{uuid}` via `generate_mlflow_run_name`). All traces from that invocation are grouped under one MLflow session (default: the run’s `run_id`; override with `MLFLOW_SESSION_ID`). It logs sanitized config params, workflow spans (NLP extraction, PDF discovery, pipeline, aggregation), metrics (`pdf_count`, `total_chunks`, `total_embeddings`, `error_count`, `non_null_embeddings`), and writes `error_reports.json` when any file fails. Per-PDF tasks also emit spans when `ENABLE_TRACING` is set in the environment before worker modules load.
+With `ENABLE_TRACING=1`, the CLI connects to `mlflow_tracking_uri`, uses `mlflow_experiment_name`, and starts a uniquely named run (`docling_pdf_processing_{timestamp}_{uuid}` via `generate_mlflow_run_name`). All traces from that invocation are grouped under one MLflow session (default: the run’s `run_id`; override with `MLFLOW_SESSION_ID`). It logs sanitized config params, workflow spans (NLP extraction, document discovery, pipeline, aggregation), metrics (`document_count`, `total_chunks`, `total_embeddings`, `error_count`, `non_null_embeddings`), and writes `error_reports.json` when any file fails. Per-document tasks also emit spans when `ENABLE_TRACING` is set in the environment before worker modules load.
 
 ## Environment Variables
 
 | Variable | Default | Role |
 |---|---|---|
-| `FOLDER_PATH` | `./pdfs` | Directory containing PDF files to process |
+| `FOLDER_PATH` | `./pdfs` | Directory containing documents to process |
 | `EMBEDDING_API_KEY` | `your-api-key-here` | API key for the embedding endpoint |
 | `EMBEDDING_BASE_URL` | `https://api.openai.com/v1` | Base URL of the OpenAI-compatible API |
 | `EMBEDDING_MODEL` | `text-embedding-ada-002` | Model id passed to the embeddings API |
 | `EMBEDDING_DIMENSIONS` | `1536` | Expected vector size for the chosen model |
 | `CHUNK_SIZE` | `1000` | Characters per fixed-size chunk |
 | `CHUNK_OVERLAP` | `100` | Overlap between consecutive fixed-size chunks |
-| `CONVERSION_PIPELINE` | `standard` | `standard` (docling pipeline) or `vlm` (VLM pipeline) |
+| `CONVERSION_PIPELINE` | `standard` | `standard` (docling pipeline) or `vlm` (VLM pipeline; PDF only) |
 | `CHUNKING_STRATEGY` | `fixed` | `fixed` (character-based) or `hybrid` (document-aware) |
 | `LLM_MODEL` | `gpt-4o-mini` | LLM model for NLP extraction |
 | `BASE_URL` | `https://api.openai.com/v1` | Base URL for the LLM |
@@ -85,23 +85,32 @@ With `ENABLE_TRACING=1`, the CLI connects to `mlflow_tracking_uri`, uses `mlflow
 | `VLM_API_HEADERS` | `{}` | JSON object of headers for the VLM API |
 | `VLM_API_PARAMS` | `{}` | JSON object of params for the VLM API |
 | `VLM_PRESET` | `smoldocling` | Preset name for the VLM conversion |
-| `MAX_CONCURRENCY` | CPU count (`os.cpu_count()`) | Max PDFs processed in parallel per batch |
+| `MAX_CONCURRENCY` | CPU count (`os.cpu_count()`) | Max documents processed in parallel per batch |
 | `ENABLE_TRACING` | `0` | Set to `1` to enable MLflow tracing in the CLI and pipeline modules |
 | `MLFLOW_TRACKING_URI` | `http://localhost:5000` | MLflow tracking server URL (CLI tracing path) |
 | `MLFLOW_EXPERMENT_NAME` | `Docling Agent` | MLflow experiment name (env key spelling matches code) |
 | `MLFLOW_SESSION_ID` | _(unset)_ | Optional trace session id; CLI default is the active run’s `run_id` |
 
+## Supported formats
+
+| Pipeline | Formats |
+|---|---|
+| `standard` | PDF, DOCX, XLSX, Markdown (`.md`), HTML, LaTeX (`.latex`, `.tex`) |
+| `vlm` | PDF only (non-PDF files fall back to the standard pipeline) |
+
+Discovery globs in `list_document_paths` match the standard pipeline set above.
+
 ## Architecture
 
 ```mermaid
 flowchart TB
-    subgraph orchestration [process_pdfs / CLI]
+    subgraph orchestration [process_documents / CLI]
         extract[NLP config extraction]
-        listPDFs[List PDF paths]
+        listDocs[List document paths]
         invoke["document_workflow<br/>batched by max_concurrency"]
-        extract --> listPDFs --> invoke
+        extract --> listDocs --> invoke
     end
-    subgraph perDoc [parallel per PDF in batch]
+    subgraph perDoc [parallel per document in batch]
         convert[Convert]
         chunk[Chunk]
         embed[Embed]
@@ -115,8 +124,8 @@ flowchart TB
 ## Workflow
 
 1. **Extract config** (optional): If a `user_prompt` is provided (via CLI `--user_prompt` or the `user_prompt` config field), an LLM extracts configuration overrides. Unextractable parameters keep their `.env` defaults.
-2. **Load PDFs**: Discover `*.pdf` files in `FOLDER_PATH`.
-3. **Process in batches**: PDFs are handled in groups of up to `MAX_CONCURRENCY`. Within each batch, convert → chunk → embed run in parallel for every file in that batch; the next batch starts when the current one finishes. Conversion supports `standard` (default) or `vlm` pipelines; chunking supports `fixed` (character-based with `CHUNK_SIZE`/`CHUNK_OVERLAP`) or `hybrid` (docling `HybridChunker`).
+2. **Load documents**: Discover supported files in `FOLDER_PATH` via `list_document_paths`.
+3. **Process in batches**: Documents are handled in groups of up to `MAX_CONCURRENCY`. Within each batch, convert → chunk → embed run in parallel for every file in that batch; the next batch starts when the current one finishes. Conversion supports `standard` (multi-format) or `vlm` (PDF only); chunking supports `fixed` (character-based with `CHUNK_SIZE`/`CHUNK_OVERLAP`) or `hybrid` (docling `HybridChunker`).
 4. **Aggregate results**: All chunks and embeddings are merged into `documents` and `embeddings`. Per-file failures are collected in `error_reports` without stopping other files. The returned dict also includes the resolved agent settings (e.g. `folder_path`, `chunking_strategy`) except `documents` and `embeddings`.
 
 ## MLflow tracing
@@ -124,22 +133,22 @@ flowchart TB
 | When | What is recorded |
 |---|---|
 | CLI with `enable_tracing` / `ENABLE_TRACING=1` | Top-level run, LangChain/OpenAI autolog, workflow spans, metrics, `error_reports.json` artifact |
-| Pipeline modules (`ENABLE_TRACING=1` in env) | Spans on convert, chunk, embed, PDF listing, and chunking helpers |
+| Pipeline modules (`ENABLE_TRACING=1` in env) | Spans on convert, chunk, embed, document listing, and chunking helpers |
 
-**Session grouping:** The CLI sets `mlflow_session_id` to `MLFLOW_SESSION_ID` or the active run’s `run_id`, wraps the instrumented workflow in `mlflow.tracing.context(session_id=...)`, and passes the id in per-PDF config so parallel tasks tag traces the same way. Filter in the MLflow UI: ``metadata.`mlflow.trace.session` = '<session_id>'``.
+**Session grouping:** The CLI sets `mlflow_session_id` to `MLFLOW_SESSION_ID` or the active run’s `run_id`, wraps the instrumented workflow in `mlflow.tracing.context(session_id=...)`, and passes the id in per-document config so parallel tasks tag traces the same way. Filter in the MLflow UI: ``metadata.`mlflow.trace.session` = '<session_id>'``.
 
 Sensitive values are not logged as MLflow params: `api_key`, `embedding_api_key`, `vlm_api_headers`, `vlm_api_params`.
 
-Configure the tracking server and experiment via `MLFLOW_TRACKING_URI` and `MLFLOW_EXPERMENT_NAME` in `.env` (mapped to `mlflow_tracking_uri` and `mlflow_experiment_name` in the config dict). Calling `process_pdfs()` from Python does not start an MLflow run even when `enable_tracing` is in the config dict.
+Configure the tracking server and experiment via `MLFLOW_TRACKING_URI` and `MLFLOW_EXPERMENT_NAME` in `.env` (mapped to `mlflow_tracking_uri` and `mlflow_experiment_name` in the config dict). Calling `process_documents()` from Python does not start an MLflow run even when `enable_tracing` is in the config dict.
 
 ## Module structure
 
-- `src/pdf_agent.py` — entry point (`process_pdfs`, CLI, optional MLflow orchestration)
+- `src/docling_agent.py` — entry point (`process_documents`, CLI, optional MLflow orchestration)
 - `src/graph/document_pipeline.py` — batched parallel per-document convert/chunk/embed pipeline
 - `src/graph/chunking.py` — fixed-size and hybrid chunking
 - `src/graph/embeddings.py` — OpenAI-compatible embedding client
 - `src/graph/prompt_extraction.py` — NLP config extraction from natural language
-- `src/graph/pdf_paths.py` — PDF discovery
+- `src/graph/document_paths.py` — document discovery
 - `src/setup/agent_settings.py` — `.env` loading
 - `src/utils/uuids.py` — `generate_mlflow_run_name` for unique CLI run names
 - `src/utils/mlflow_tracing.py` — `session_context` for MLflow trace session grouping
