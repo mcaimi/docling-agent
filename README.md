@@ -63,7 +63,7 @@ uv run python -m src.pdf_agent --envfile .env.local
 uv run python -m src.pdf_agent --user_prompt "Use VLM pipeline and hybrid chunking"
 ```
 
-With `ENABLE_TRACING=1`, the CLI connects to `mlflow_tracking_uri`, uses `mlflow_experiment_name`, and starts a uniquely named run (`docling_pdf_processing_{timestamp}_{uuid}` via `generate_mlflow_run_name`). It logs sanitized config params, workflow spans (NLP extraction, PDF discovery, pipeline, aggregation), metrics (`pdf_count`, `total_chunks`, `total_embeddings`, `error_count`, `non_null_embeddings`), and writes `error_reports.json` when any file fails. Per-PDF tasks also emit spans when `ENABLE_TRACING` is set in the environment before worker modules load.
+With `ENABLE_TRACING=1`, the CLI connects to `mlflow_tracking_uri`, uses `mlflow_experiment_name`, and starts a uniquely named run (`docling_pdf_processing_{timestamp}_{uuid}` via `generate_mlflow_run_name`). All traces from that invocation are grouped under one MLflow session (default: the run’s `run_id`; override with `MLFLOW_SESSION_ID`). It logs sanitized config params, workflow spans (NLP extraction, PDF discovery, pipeline, aggregation), metrics (`pdf_count`, `total_chunks`, `total_embeddings`, `error_count`, `non_null_embeddings`), and writes `error_reports.json` when any file fails. Per-PDF tasks also emit spans when `ENABLE_TRACING` is set in the environment before worker modules load.
 
 ## Environment Variables
 
@@ -89,6 +89,7 @@ With `ENABLE_TRACING=1`, the CLI connects to `mlflow_tracking_uri`, uses `mlflow
 | `ENABLE_TRACING` | `0` | Set to `1` to enable MLflow tracing in the CLI and pipeline modules |
 | `MLFLOW_TRACKING_URI` | `http://localhost:5000` | MLflow tracking server URL (CLI tracing path) |
 | `MLFLOW_EXPERMENT_NAME` | `Docling Agent` | MLflow experiment name (env key spelling matches code) |
+| `MLFLOW_SESSION_ID` | _(unset)_ | Optional trace session id; CLI default is the active run’s `run_id` |
 
 ## Architecture
 
@@ -125,6 +126,8 @@ flowchart TB
 | CLI with `enable_tracing` / `ENABLE_TRACING=1` | Top-level run, LangChain/OpenAI autolog, workflow spans, metrics, `error_reports.json` artifact |
 | Pipeline modules (`ENABLE_TRACING=1` in env) | Spans on convert, chunk, embed, PDF listing, and chunking helpers |
 
+**Session grouping:** The CLI sets `mlflow_session_id` to `MLFLOW_SESSION_ID` or the active run’s `run_id`, wraps the instrumented workflow in `mlflow.tracing.context(session_id=...)`, and passes the id in per-PDF config so parallel tasks tag traces the same way. Filter in the MLflow UI: ``metadata.`mlflow.trace.session` = '<session_id>'``.
+
 Sensitive values are not logged as MLflow params: `api_key`, `embedding_api_key`, `vlm_api_headers`, `vlm_api_params`.
 
 Configure the tracking server and experiment via `MLFLOW_TRACKING_URI` and `MLFLOW_EXPERMENT_NAME` in `.env` (mapped to `mlflow_tracking_uri` and `mlflow_experiment_name` in the config dict). Calling `process_pdfs()` from Python does not start an MLflow run even when `enable_tracing` is in the config dict.
@@ -139,6 +142,7 @@ Configure the tracking server and experiment via `MLFLOW_TRACKING_URI` and `MLFL
 - `src/graph/pdf_paths.py` — PDF discovery
 - `src/setup/agent_settings.py` — `.env` loading
 - `src/utils/uuids.py` — `generate_mlflow_run_name` for unique CLI run names
+- `src/utils/mlflow_tracing.py` — `session_context` for MLflow trace session grouping
 
 ## Dependencies
 

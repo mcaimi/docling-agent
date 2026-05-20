@@ -89,6 +89,7 @@ When `enable_tracing` is truthy in loaded settings, `__main__` runs the instrume
 | `ENABLE_TRACING` | `0` | Non-zero enables MLflow spans in pipeline modules and the instrumented CLI path |
 | `MLFLOW_TRACKING_URI` | `http://localhost:5000` | Tracking server URL → `mlflow_tracking_uri` |
 | `MLFLOW_EXPERMENT_NAME` | `Docling Agent` | Experiment name → `mlflow_experiment_name` (env key spelling matches `agent_settings.py`) |
+| `MLFLOW_SESSION_ID` | _(unset)_ | Optional trace session override → `mlflow_session_id`; CLI default is the active run’s `run_id` |
 
 ## Architecture
 
@@ -153,6 +154,7 @@ classDiagram
         +int enable_tracing
         +str mlflow_tracking_uri
         +str mlflow_experiment_name
+        +str mlflow_session_id
         +str user_prompt
     }
 
@@ -218,6 +220,7 @@ classDiagram
 | [`src/setup/agent_settings.py`](src/setup/agent_settings.py) | `load_environment_variables` — `.env` via `python-dotenv`; maps tracing and MLflow env vars |
 | [`src/utils/json_parse.py`](src/utils/json_parse.py) | `_parse_json_object_str` for VLM headers/params env vars |
 | [`src/utils/uuids.py`](src/utils/uuids.py) | `generate_mlflow_run_name` — `docling_pdf_processing_{timestamp}_{uuid}` for CLI runs |
+| [`src/utils/mlflow_tracing.py`](src/utils/mlflow_tracing.py) | `session_context` — wraps `mlflow.tracing.context(session_id=...)` for grouped traces |
 
 Removed modules (do not reference): `graph_state.py`, `graph_nodes.py`, `pdf_conversion.py`, `create_pdf_processor_graph`.
 
@@ -243,6 +246,9 @@ When `agent_settings["enable_tracing"]` is truthy:
 - `mlflow.set_tracking_uri(agent_settings["mlflow_tracking_uri"])`, `mlflow.set_experiment(agent_settings["mlflow_experiment_name"])`
 - `mlflow.langchain.autolog()`, `mlflow.openai.autolog()`
 - Run name from `generate_mlflow_run_name()` in [`src/utils/uuids.py`](src/utils/uuids.py) (`docling_pdf_processing_{timestamp}_{uuid}`)
+- **Session grouping**: `session_id = mlflow_session_id or run.info.run_id`, stored on `agent_settings` and applied via [`session_context`](src/utils/mlflow_tracing.py) around the workflow and in each pipeline `@task` (so CLI spans, LangChain/OpenAI autolog traces, and per-PDF spans share `metadata.mlflow.trace.session`)
+- Run tag `mlflow.trace.session` set to the session id
+- Optional env `MLFLOW_SESSION_ID` overrides the default session id
 - Sanitized params logged (excludes `api_key`, `embedding_api_key`, `vlm_api_headers`, `vlm_api_params`)
 - Spans: `NLP prompt extraction`, `PDF discovery`, `Parallel pipeline`, `Results aggregation`
 - Metrics: `pdf_count`, `total_chunks`, `total_embeddings`, `error_count`, `non_null_embeddings`
@@ -263,6 +269,8 @@ When `agent_settings["enable_tracing"]` is truthy:
 | `embeddings` | `embed_texts` | `model`, `text_count`, `embedding_dimensions`, `success_count`, `failure_count` |
 | `pdf_paths` | `list_pdfs` | `folder`, `pdf_count` |
 
+Filter grouped traces in the MLflow UI: ``metadata.`mlflow.trace.session` = '<run_id or MLFLOW_SESSION_ID>'``.
+
 ## Conventions for agents
 
 - **Entry point**: `process_pdfs(agent_settings: dict) -> dict`. Config is a plain dict throughout; there is no `PDFProcessorState` TypedDict or compiled `StateGraph`.
@@ -272,7 +280,7 @@ When `agent_settings["enable_tracing"]` is truthy:
 - **Hybrid chunking** requires `docling_document` on the conversion record; fixed chunking uses markdown `content`.
 - **NLP extraction** covers 15 keys (`_CONFIG_KEYS` in `extractor.py`); `vlm_api_params` is only set via env/config dict, not the LLM extractor.
 - **Concurrency**: `max_concurrency` limits parallel PDFs **per batch**, not unbounded fan-out across the full file list.
-- **Tracing**: Set `ENABLE_TRACING=1` in `.env` before worker imports for task spans; use CLI with `enable_tracing` for top-level runs and metrics. Configure `MLFLOW_TRACKING_URI` and `MLFLOW_EXPERMENT_NAME` (note env spelling). Do not log secrets as MLflow params.
+- **Tracing**: Set `ENABLE_TRACING=1` in `.env` before worker imports for task spans; use CLI with `enable_tracing` for top-level runs and metrics. Session id defaults to the CLI run’s `run_id` and is passed to workers via `agent_settings["mlflow_session_id"]`. Configure `MLFLOW_TRACKING_URI` and `MLFLOW_EXPERMENT_NAME` (note env spelling). Do not log secrets as MLflow params.
 
 ## Dependencies
 
