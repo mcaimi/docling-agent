@@ -22,10 +22,9 @@ except ImportError as e:
 try:
     from .chunking import chunk_document_records, chunk_document_records_hybrid
     from .embeddings import embed_texts
+    from ..utils.mlflow_tracing import session_context
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
-
-import os
 
 # check if tracing is enabled
 enable_tracing = int(os.getenv("ENABLE_TRACING", "0")) == 1
@@ -124,35 +123,37 @@ def convert_doc(
     config = item["config"]
     pdf_path = item["pdf_path"]
     pipeline = config.get("conversion_pipeline")
+    session_id = config.get("mlflow_session_id") if enable_tracing else None
 
     # displayinfo
     print(f" -> conversion task in path {os.path.basename(pdf_path)}, using pipeline mode: {pipeline}")
 
-    try:
-        converter = _new_converter(
-            pipeline=pipeline,
-            vlm_api_url=config.get("vlm_api_url"),
-            vlm_api_headers=config.get("vlm_api_headers"),
-            vlm_api_params=config.get("vlm_api_params"),
-            vlm_preset=config.get("vlm_preset"),
-        )
+    with session_context(session_id):
+        try:
+            converter = _new_converter(
+                pipeline=pipeline,
+                vlm_api_url=config.get("vlm_api_url"),
+                vlm_api_headers=config.get("vlm_api_headers"),
+                vlm_api_params=config.get("vlm_api_params"),
+                vlm_preset=config.get("vlm_preset"),
+            )
 
-        result = converter.convert(pdf_path)
-        doc = _result_to_record(pdf_path, result, pipeline)
+            result = converter.convert(pdf_path)
+            doc = _result_to_record(pdf_path, result, pipeline)
 
-        if enable_tracing:
-            with _ml.start_span("convert_pdf"):
-                _ml.set_tag("pipeline", pipeline)
-                _ml.set_tag("file", os.path.basename(pdf_path))
-                _ml.set_tag("page_count", result.input.page_count)
+            if enable_tracing:
+                with _ml.start_span("convert_pdf"):
+                    _ml.set_tag("pipeline", pipeline)
+                    _ml.set_tag("file", os.path.basename(pdf_path))
+                    _ml.set_tag("page_count", result.input.page_count)
 
-        return {"doc": doc, "path": pdf_path, "error": None, "config": config}
-    except Exception as e:
-        if enable_tracing:
-            with _ml.start_span("convert_pdf"):
-                _ml.set_tag("error", str(e))
-        print(f"Error converting {pdf_path}: {e}")
-        return {"doc": None, "path": pdf_path, "error": str(e), "config": config}
+            return {"doc": doc, "path": pdf_path, "error": None, "config": config}
+        except Exception as e:
+            if enable_tracing:
+                with _ml.start_span("convert_pdf"):
+                    _ml.set_tag("error", str(e))
+            print(f"Error converting {pdf_path}: {e}")
+            return {"doc": None, "path": pdf_path, "error": str(e), "config": config}
 
 
 @task
@@ -173,28 +174,38 @@ def chunk_doc(
     converted_task = item["converted"]
     result = converted_task.result()
     config = result.get("config", {})
-    if result.get("error") or result["doc"] is None:
-        return {"chunks": [], "path": result["path"], "error": result["error"], "config": config}
+    session_id = config.get("mlflow_session_id") if enable_tracing else None
 
-    strategy = config.get("chunking_strategy")
-    doc = result["doc"]
+    with session_context(session_id):
+        if result.get("error") or result["doc"] is None:
+            return {
+                "chunks": [],
+                "path": result["path"],
+                "error": result["error"],
+                "config": config,
+            }
 
-    if strategy == "hybrid":
-        chunks = chunk_document_records_hybrid([doc])
-    else:
-        chunks = chunk_document_records(
-            [doc],
-            config.get("chunk_size", 1000),
-            config.get("chunk_overlap", 100),
+        strategy = config.get("chunking_strategy")
+        doc = result["doc"]
+
+        if strategy == "hybrid":
+            chunks = chunk_document_records_hybrid([doc])
+        else:
+            chunks = chunk_document_records(
+                [doc],
+                config.get("chunk_size", 1000),
+                config.get("chunk_overlap", 100),
+            )
+
+        if enable_tracing:
+            with _ml.start_span("chunk_doc"):
+                _ml.set_tag("chunking_strategy", strategy)
+                _ml.set_tag("chunk_count", len(chunks))
+
+        print(
+            f" -> Chunking completed for path {result.get('path')}: produced {len(chunks)} chunks"
         )
-
-    if enable_tracing:
-        with _ml.start_span("chunk_doc"):
-            _ml.set_tag("chunking_strategy", strategy)
-            _ml.set_tag("chunk_count", len(chunks))
-
-    print(f" -> Chunking completed for path {result.get('path')}: produced {len(chunks)} chunks")
-    return {"chunks": chunks, "path": result["path"], "error": None, "config": config}
+        return {"chunks": chunks, "path": result["path"], "error": None, "config": config}
 
 
 @task
@@ -215,36 +226,54 @@ def embed_doc(
     chunked_task = item["chunked"]
     result = chunked_task.result()
     config = result.get("config", {})
-    if result.get("error") or not result["chunks"]:
-        return {"embeddings": [], "path": result["path"], "error": result["error"], "config": config}
+    session_id = config.get("mlflow_session_id") if enable_tracing else None
 
-    chunks = result["chunks"]
-    texts = [c["content"] for c in chunks]
+    with session_context(session_id):
+        if result.get("error") or not result["chunks"]:
+            return {
+                "embeddings": [],
+                "path": result["path"],
+                "error": result["error"],
+                "config": config,
+            }
 
-    # display info
-    print(f" -> Embedding {len(texts)} chunks...")
+        chunks = result["chunks"]
+        texts = [c["content"] for c in chunks]
 
-    try:
-        vectors = embed_texts(
-            texts,
-            config.get("embedding_model"),
-            config.get("embedding_base_url"),
-            config.get("embedding_api_key", ""),
-        )
-        if enable_tracing:
-            with _ml.start_span("embed_doc"):
-                _ml.set_tag("embedding_model", config.get("embedding_model", "unknown"))
-                _ml.set_tag("chunk_count", len(texts))
-                _ml.set_tag("embedding_count", len(vectors))
-                _ml.set_tag("non_null_count", sum(1 for v in vectors if v is not None))
-    except Exception as e:
-        if enable_tracing:
-            with _ml.start_span("embed_doc"):
-                _ml.set_tag("error", str(e))
-        raise
+        # display info
+        print(f" -> Embedding {len(texts)} chunks...")
 
-    print(f" -> Produced {len(vectors)} embeddings.")
-    return {"chunks": chunks, "embeddings": vectors, "path": result["path"], "error": None, "config": config}
+        try:
+            vectors = embed_texts(
+                texts,
+                config.get("embedding_model"),
+                config.get("embedding_base_url"),
+                config.get("embedding_api_key", ""),
+            )
+            if enable_tracing:
+                with _ml.start_span("embed_doc"):
+                    _ml.set_tag(
+                        "embedding_model", config.get("embedding_model", "unknown")
+                    )
+                    _ml.set_tag("chunk_count", len(texts))
+                    _ml.set_tag("embedding_count", len(vectors))
+                    _ml.set_tag(
+                        "non_null_count", sum(1 for v in vectors if v is not None)
+                    )
+        except Exception as e:
+            if enable_tracing:
+                with _ml.start_span("embed_doc"):
+                    _ml.set_tag("error", str(e))
+            raise
+
+        print(f" -> Produced {len(vectors)} embeddings.")
+        return {
+            "chunks": chunks,
+            "embeddings": vectors,
+            "path": result["path"],
+            "error": None,
+            "config": config,
+        }
 
 
 def _max_concurrency_from_config(config: RunnableConfig) -> int:
