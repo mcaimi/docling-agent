@@ -78,6 +78,7 @@ def _get_settings_from_environment():
         ),
         "vlm_api_params": _parse_json_object_str(_str_setting("VLM_API_PARAMS", "{}")),
         "vlm_preset": _str_setting("VLM_PRESET", "smoldocling"),
+        "max_concurrency": _int_setting("MAX_CONCURRENCY", os.cpu_count())
     }
     return settings
 

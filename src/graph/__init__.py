@@ -3,17 +3,19 @@
 
 # import the graph state
 try:
-    from .graph_state import PDFProcessorState
-    from .graph_nodes import load_pdfs, convert_pdfs, chunk_documents, generate_embeddings, extract_config_from_prompt
+    from .prompt_extraction import extract_config_from_prompt, merge_overrides
+    from .pdf_paths import list_pdf_paths
+    from .document_pipeline import document_workflow, convert_doc, chunk_doc, embed_doc
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
 
-# export the graph state
+# export
 __all__ = [
-    "PDFProcessorState",
-    "load_pdfs",
-    "convert_pdfs",
-    "chunk_documents",
-    "generate_embeddings",
+    "document_workflow",
+    "convert_doc",
+    "chunk_doc",
+    "embed_doc",
+    "list_pdf_paths",
     "extract_config_from_prompt",
+    "merge_overrides",
 ]
