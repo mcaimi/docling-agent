@@ -63,7 +63,7 @@ uv run python -m src.docling_agent --envfile .env.local
 uv run python -m src.docling_agent --user_prompt "Use VLM pipeline and hybrid chunking"
 ```
 
-When `enable_tracing` is truthy in loaded settings, `__main__` runs the instrumented path in `src/docling_agent.py` (MLflow run + spans) instead of calling `process_documents()` directly.
+When `enable_tracing` is truthy in loaded settings, the CLI calls `process_documents(..., enable_tracing=True)` for an MLflow run with top-level spans and metrics.
 
 ## Environment Variables
 
@@ -267,7 +267,7 @@ When `agent_settings["enable_tracing"]` is truthy:
 - Artifact: `error_reports.json` when `error_reports` is non-empty
 - Tag `nlp_extracted_keys` when NLP overrides apply
 
-`process_documents()` does **not** start MLflow runs; only the CLI `__main__` block does. Library callers must instrument themselves if needed.
+`process_documents(..., enable_tracing=True)` starts an MLflow run with top-level spans and metrics. Pipeline task spans still require `ENABLE_TRACING=1` in the environment before worker modules import.
 
 ### Task-level spans (when `ENABLE_TRACING=1` at worker import)
 
@@ -285,7 +285,7 @@ Filter grouped traces in the MLflow UI: ``metadata.`mlflow.trace.session` = '<ru
 
 ## Conventions for agents
 
-- **Entry point**: `process_documents(agent_settings: dict) -> dict`. Config is a plain dict throughout; there is no `PDFProcessorState` TypedDict or compiled `StateGraph`.
+- **Entry point**: `process_documents(agent_settings: dict, *, enable_tracing: bool = False) -> dict`. Config is a plain dict throughout; there is no `PDFProcessorState` TypedDict or compiled `StateGraph`.
 - **Return shape**: Besides `documents`, `embeddings`, and `error_reports`, the dict includes all keys from the resolved `agent_settings` except `documents` and `embeddings` (useful for inspecting NLP merges and final config).
 - **Extend the pipeline** by adding or modifying `@task` functions in `document_pipeline.py`, not by wiring LangGraph nodes in a central graph.
 - **Per-file isolation**: Conversion failures do not abort other documents; check `error_reports` in the result.
@@ -294,7 +294,7 @@ Filter grouped traces in the MLflow UI: ``metadata.`mlflow.trace.session` = '<ru
 - **NLP extraction** covers 15 keys (`_CONFIG_KEYS` in `extractor.py`); `vlm_api_params` is only set via env/config dict, not the LLM extractor.
 - **Concurrency**: `max_concurrency` limits parallel documents **per batch**, not unbounded fan-out across the full file list.
 - **Pipeline input**: Prefer `{"file_path": str, "config": dict}`; `pdf_path` is legacy but still accepted.
-- **Tracing**: Set `ENABLE_TRACING=1` in `.env` before worker imports for task spans; use CLI with `enable_tracing` for top-level runs and metrics. Session id defaults to the CLI run’s `run_id` and is passed to workers via `agent_settings["mlflow_session_id"]`. Configure `MLFLOW_TRACKING_URI` and `MLFLOW_EXPERMENT_NAME` (note env spelling). Do not log secrets as MLflow params.
+- **Tracing**: Set `ENABLE_TRACING=1` in `.env` before worker imports for task spans; pass `enable_tracing=True` to `process_documents` (or use the CLI with `enable_tracing` in settings) for top-level runs and metrics. Session id defaults to the run’s `run_id` and is passed to workers via `agent_settings["mlflow_session_id"]`. Configure `MLFLOW_TRACKING_URI` and `MLFLOW_EXPERMENT_NAME` (note env spelling). Do not log secrets as MLflow params.
 
 ## Dependencies
 

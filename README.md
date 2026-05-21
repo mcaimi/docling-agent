@@ -36,7 +36,7 @@ agent_settings = load_environment_variables(".env")
 #     "chunk_size": 1000,
 #     "chunk_overlap": 100,
 #     "max_concurrency": 4,
-#     "enable_tracing": 0,  # MLflow tracing is CLI-only; library API ignores this
+#     "enable_tracing": 0,
 #     "mlflow_tracking_uri": "http://localhost:5000",
 #     "mlflow_experiment_name": "Docling Agent",
 # }
@@ -139,7 +139,7 @@ flowchart TB
 
 Sensitive values are not logged as MLflow params: `api_key`, `embedding_api_key`, `vlm_api_headers`, `vlm_api_params`.
 
-Configure the tracking server and experiment via `MLFLOW_TRACKING_URI` and `MLFLOW_EXPERMENT_NAME` in `.env` (mapped to `mlflow_tracking_uri` and `mlflow_experiment_name` in the config dict). Calling `process_documents()` from Python does not start an MLflow run even when `enable_tracing` is in the config dict.
+Configure the tracking server and experiment via `MLFLOW_TRACKING_URI` and `MLFLOW_EXPERMENT_NAME` in `.env` (mapped to `mlflow_tracking_uri` and `mlflow_experiment_name` in the config dict). Pass `enable_tracing=True` to `process_documents()` to start a top-level MLflow run; the config dict key alone does not enable tracing unless you pass the flag (the CLI maps `enable_tracing` from settings).
 
 ## Module structure
 
