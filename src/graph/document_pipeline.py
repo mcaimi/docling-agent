@@ -22,6 +22,7 @@ except ImportError as e:
 try:
     from .chunking import chunk_document_records, chunk_document_records_hybrid
     from .embeddings import embed_texts
+    from .vector_store import get_vector_store, store_chunk_embeddings
     from ..utils.mlflow_tracing import session_context
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
@@ -320,6 +321,82 @@ def embed_doc(
         }
 
 
+@task
+def store_doc(item: dict) -> dict:
+    """Persist one document's chunk embeddings to the configured vector store.
+
+    Parameters
+    ----------
+    item : dict with "embedded" (Task) key.
+
+    Returns
+    -------
+    dict
+        Embed output plus ``stored_count`` and ``store_error``.
+    """
+    embedded_task = item["embedded"]
+    result = embedded_task.result()
+    config = result.get("config", {})
+    session_id = config.get("mlflow_session_id") if enable_tracing else None
+    backend = (config.get("vector_store_backend") or "none").strip().lower()
+
+    print(f" -> Vector store backend: {backend}")
+
+    base = {
+        "chunks": result.get("chunks", []),
+        "embeddings": result.get("embeddings", []),
+        "path": result["path"],
+        "error": result.get("error"),
+        "config": config,
+        "stored_count": 0,
+        "store_error": None,
+    }
+
+    with session_context(session_id):
+        if (
+            backend in ("", "none")
+            or result.get("error")
+            or not result.get("chunks")
+        ):
+            return base
+
+        print(
+            f" -> Storing embeddings for {os.path.basename(result['path'])} "
+            f"({backend})..."
+        )
+        try:
+            vector_store = get_vector_store(config)
+            if vector_store is None:
+                return base
+
+            batch_size = max(1, int(config.get("vector_store_batch_size", 200)))
+            store_result = store_chunk_embeddings(
+                vector_store,
+                result["chunks"],
+                result["embeddings"],
+                batch_size=batch_size,
+            )
+            stored_count = store_result["stored_count"]
+            skipped = store_result["skipped_count"]
+
+            if enable_tracing:
+                with _ml.start_span("store_doc"):
+                    _ml.set_tag("backend", backend)
+                    _ml.set_tag("file", os.path.basename(result["path"]))
+                    _ml.set_tag("stored_count", stored_count)
+                    _ml.set_tag("skipped_count", skipped)
+
+            print(f" -> Stored {stored_count} vectors ({skipped} skipped).")
+            return {**base, "stored_count": stored_count}
+        except Exception as e:
+            if enable_tracing:
+                with _ml.start_span("store_doc"):
+                    _ml.set_tag("backend", backend)
+                    _ml.set_tag("error", str(e))
+            print(f"Error storing vectors for {result['path']}: {e}")
+            return {**base, "store_error": str(e)}
+
+
 def _max_concurrency_from_config(config: RunnableConfig) -> int:
     """Read and validate max_concurrency from RunnableConfig.configurable."""
     raw = (config or {}).get("configurable", {}).get("max_concurrency")
@@ -337,11 +414,11 @@ def document_workflow(
     config: RunnableConfig = {},
 ) -> list[dict]:
     """
-    Run the full convert->chunk->embed pipeline for each document in parallel.
+    Run the full convert->chunk->embed->store pipeline for each document in parallel.
 
     Parallelism is capped by ``config["configurable"]["max_concurrency"]`` (default:
     CPU count). Documents are processed in batches; each batch runs convert, chunk,
-    and embed for up to that many documents before the next batch starts.
+    embed, and store for up to that many documents before the next batch starts.
 
     Parameters
     ----------
@@ -353,8 +430,8 @@ def document_workflow(
     Returns
     -------
     list[dict]
-        One result dict per input, with "chunks", "embeddings", "path",
-        "error", and "config".
+        One result dict per input, with "chunks", "embeddings", "stored_count",
+        "store_error", "path", "error", and "config".
     """
     max_conc = _max_concurrency_from_config(config)
     results: list[dict] = []
@@ -373,7 +450,8 @@ def document_workflow(
         ]
         chunked = [chunk_doc({"converted": t}) for t in converted]
         embedded = [embed_doc({"chunked": t}) for t in chunked]
-        results.extend(t.result() for t in embedded)
+        stored = [store_doc({"embedded": t}) for t in embedded]
+        results.extend(t.result() for t in stored)
 
     print(f" -> Document workflow completed with {len(results)} results")
     return results

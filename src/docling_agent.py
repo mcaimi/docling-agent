@@ -44,15 +44,28 @@ def _aggregate_pipeline_results(
     pipeline_result: list[dict[str, Any]],
 ) -> dict[str, Any]:
     documents, embeddings, errors = [], [], []
+    vectors_stored = 0
     for item in pipeline_result:
-        documents.extend(item["chunks"])
-        embeddings.extend(item["embeddings"])
+        documents.extend(item.get("chunks", []))
+        embeddings.extend(item.get("embeddings", []))
+        vectors_stored += item.get("stored_count", 0)
         if item.get("error"):
-            errors.append({"path": item["path"], "error": item["error"]})
+            errors.append(
+                {"path": item["path"], "error": item["error"], "stage": "pipeline"}
+            )
+        if item.get("store_error"):
+            errors.append(
+                {
+                    "path": item["path"],
+                    "error": item["store_error"],
+                    "stage": "vector_store",
+                }
+            )
 
     return {
         "documents": documents,
         "embeddings": embeddings,
+        "vectors_stored": vectors_stored,
         "error_reports": errors,
         **{
             k: v
@@ -133,10 +146,16 @@ def _run_workflow_with_mlflow(agent_settings: dict[str, Any]) -> dict[str, Any]:
                 documents = final_result["documents"]
                 embeddings = final_result["embeddings"]
                 errors = final_result["error_reports"]
+                vectors_stored = final_result["vectors_stored"]
 
                 mlflow.log_metric("total_chunks", len(documents))
                 mlflow.log_metric("total_embeddings", len(embeddings))
+                mlflow.log_metric("vectors_stored", vectors_stored)
                 mlflow.log_metric("error_count", len(errors))
+                mlflow.log_metric(
+                    "vector_store_error_count",
+                    sum(1 for e in errors if e.get("stage") == "vector_store"),
+                )
                 mlflow.log_metric(
                     "non_null_embeddings",
                     sum(1 for e in embeddings if e is not None),
@@ -167,11 +186,15 @@ def _print_run_summary(result: dict[str, Any]) -> None:
     print("Document processing completed successfully")
     print(f"Total chunks processed: {len(result['documents'])}")
     print(f"Total embeddings generated: {len(result['embeddings'])}")
+    backend = (result.get("vector_store_backend") or "none").lower()
+    if backend not in ("", "none"):
+        print(f"Vectors stored in {backend}: {result.get('vectors_stored', 0)}")
     errors = result.get("error_reports", [])
     if errors:
         print(f"Files with errors: {len(errors)}")
         for err in errors:
-            print(f"  - {err['path']}: {err['error']}")
+            stage = err.get("stage", "pipeline")
+            print(f"  - [{stage}] {err['path']}: {err['error']}")
 
 
 # parse command line arguments
