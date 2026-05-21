@@ -78,7 +78,11 @@ def _get_settings_from_environment():
         ),
         "vlm_api_params": _parse_json_object_str(_str_setting("VLM_API_PARAMS", "{}")),
         "vlm_preset": _str_setting("VLM_PRESET", "smoldocling"),
-        "max_concurrency": _int_setting("MAX_CONCURRENCY", os.cpu_count())
+        "max_concurrency": _int_setting("MAX_CONCURRENCY", os.cpu_count()),
+        "enable_tracing": _int_setting("ENABLE_TRACING", 0),
+        "mlflow_tracking_uri": _str_setting("MLFLOW_TRACKING_URI", "http://localhost:5000"),
+        "mlflow_experiment_name": _str_setting("MLFLOW_EXPERMENT_NAME", "Docling Agent"),
+        "mlflow_session_id": _strip_or_none("MLFLOW_SESSION_ID"),
     }
     return settings
 

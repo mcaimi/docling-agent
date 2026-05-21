@@ -22,8 +22,49 @@ except ImportError as e:
 try:
     from .chunking import chunk_document_records, chunk_document_records_hybrid
     from .embeddings import embed_texts
+    from ..utils.mlflow_tracing import session_context
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
+
+# Formats supported by the standard docling pipeline (VLM remains PDF-only).
+SUPPORTED_INPUT_FORMATS: tuple[InputFormat, ...] = (
+    InputFormat.PDF,
+    InputFormat.DOCX,
+    InputFormat.XLSX,
+    InputFormat.MD,
+    InputFormat.HTML,
+    InputFormat.LATEX,
+)
+
+# check if tracing is enabled
+enable_tracing = int(os.getenv("ENABLE_TRACING", "0")) == 1
+
+if enable_tracing:
+    try:
+        import mlflow as _ml
+    except ImportError:
+        print("MLflow is not installed. Tracing is disabled.")
+        enable_tracing = False
+
+def _file_path_from_item(item: dict) -> str:
+    """Resolve document path from pipeline input (``file_path`` or legacy ``pdf_path``)."""
+    path = item.get("file_path") or item.get("pdf_path")
+    if not path:
+        raise KeyError("item must include 'file_path' or 'pdf_path'")
+    return path
+
+
+def _is_pdf_path(file_path: str) -> bool:
+    return os.path.splitext(file_path)[1].lower() == ".pdf"
+
+
+def _effective_pipeline(
+    file_path: str, pipeline: Literal["standard", "vlm"]
+) -> Literal["standard", "vlm"]:
+    """VLM conversion applies only to PDF; other extensions use the standard pipeline."""
+    if pipeline == "vlm" and not _is_pdf_path(file_path):
+        return "standard"
+    return pipeline
 
 
 # create a DocumentConverter instance per parallel execution
@@ -61,12 +102,12 @@ def _new_converter(
             },
         )
 
-    return DocumentConverter(allowed_formats=[InputFormat.PDF])
+    return DocumentConverter(allowed_formats=list(SUPPORTED_INPUT_FORMATS))
 
 
 # convert docling data to dictionary
 def _result_to_record(
-    pdf_path: str,
+    file_path: str,
     conv: ConversionResult,
     conversion_pipeline: Literal["standard", "vlm"],
 ) -> dict[str, Any]:
@@ -77,11 +118,11 @@ def _result_to_record(
     try:
         title = conv.input.file.stem
     except (AttributeError, TypeError):
-        title = os.path.splitext(os.path.basename(pdf_path))[0]
+        title = os.path.splitext(os.path.basename(file_path))[0]
 
     metadata: dict[str, Any] = {
-        "file_path": pdf_path,
-        "file_name": os.path.basename(pdf_path),
+        "file_path": file_path,
+        "file_name": os.path.basename(file_path),
         "page_count": page_count,
         "title": title,
         "conversion_pipeline": conversion_pipeline,
@@ -98,11 +139,14 @@ def _result_to_record(
 def convert_doc(
     item: dict,
 ) -> dict:
-    """Convert a single PDF with a dedicated DocumentConverter instance.
+    """Convert a single document with a dedicated DocumentConverter instance.
+
+    Supports PDF, DOCX, XLSX, and Markdown. VLM pipeline applies to PDF only;
+    other formats are converted with the standard pipeline.
 
     Parameters
     ----------
-    item : {"pdf_path": str, "config": dict}
+    item : {"file_path": str, "config": dict} or {"pdf_path": str, "config": dict}
         Contains the file path and agent config.
 
     Returns
@@ -111,27 +155,49 @@ def convert_doc(
         {"doc": record|None, "path": str, "error": str|None, "config": dict}
     """
     config = item["config"]
-    pdf_path = item["pdf_path"]
-    pipeline = config.get("conversion_pipeline")
+    file_path = _file_path_from_item(item)
+    requested_pipeline = config.get("conversion_pipeline")
+    pipeline = _effective_pipeline(file_path, requested_pipeline)
+    session_id = config.get("mlflow_session_id") if enable_tracing else None
 
     # displayinfo
-    print(f" -> conversion task in path {os.path.basename(pdf_path)}, using pipeline mode: {pipeline}")
-
-    # run conversion
-    try:
-        converter = _new_converter(
-            pipeline=pipeline,
-            vlm_api_url=config.get("vlm_api_url"),
-            vlm_api_headers=config.get("vlm_api_headers"),
-            vlm_api_params=config.get("vlm_api_params"),
-            vlm_preset=config.get("vlm_preset"),
+    print(
+        f" -> conversion task in path {os.path.basename(file_path)}, "
+        f"using pipeline mode: {pipeline}"
+        + (
+            f" (VLM skipped for non-PDF; requested {requested_pipeline})"
+            if pipeline != requested_pipeline
+            else ""
         )
-        result = converter.convert(pdf_path)
-        doc = _result_to_record(pdf_path, result, pipeline)
-        return {"doc": doc, "path": pdf_path, "error": None, "config": config}
-    except Exception as e:
-        print(f"Error converting {pdf_path}: {e}")
-        return {"doc": None, "path": pdf_path, "error": str(e), "config": config}
+    )
+
+    with session_context(session_id):
+        try:
+            converter = _new_converter(
+                pipeline=pipeline,
+                vlm_api_url=config.get("vlm_api_url"),
+                vlm_api_headers=config.get("vlm_api_headers"),
+                vlm_api_params=config.get("vlm_api_params"),
+                vlm_preset=config.get("vlm_preset"),
+            )
+
+            result = converter.convert(file_path)
+            doc = _result_to_record(file_path, result, pipeline)
+
+            if enable_tracing:
+                with _ml.start_span("convert_pdf"):
+                    _ml.set_tag("pipeline", pipeline)
+                    _ml.set_tag("file", os.path.basename(file_path))
+                    _ml.set_tag("file_format", os.path.splitext(file_path)[1].lower())
+                    _ml.set_tag("page_count", result.input.page_count)
+
+            return {"doc": doc, "path": file_path, "error": None, "config": config}
+        except Exception as e:
+            if enable_tracing:
+                with _ml.start_span("convert_pdf"):
+                    _ml.set_tag("error", str(e))
+            print(f"Error converting {file_path}: {e}")
+            return {"doc": None, "path": file_path, "error": str(e), "config": config}
 
 
 @task
@@ -152,23 +218,38 @@ def chunk_doc(
     converted_task = item["converted"]
     result = converted_task.result()
     config = result.get("config", {})
-    if result.get("error") or result["doc"] is None:
-        return {"chunks": [], "path": result["path"], "error": result["error"], "config": config}
+    session_id = config.get("mlflow_session_id") if enable_tracing else None
 
-    strategy = config.get("chunking_strategy")
-    doc = result["doc"]
+    with session_context(session_id):
+        if result.get("error") or result["doc"] is None:
+            return {
+                "chunks": [],
+                "path": result["path"],
+                "error": result["error"],
+                "config": config,
+            }
 
-    if strategy == "hybrid":
-        chunks = chunk_document_records_hybrid([doc])
-    else:
-        chunks = chunk_document_records(
-            [doc],
-            config.get("chunk_size", 1000),
-            config.get("chunk_overlap", 100),
+        strategy = config.get("chunking_strategy")
+        doc = result["doc"]
+
+        if strategy == "hybrid":
+            chunks = chunk_document_records_hybrid([doc])
+        else:
+            chunks = chunk_document_records(
+                [doc],
+                config.get("chunk_size", 1000),
+                config.get("chunk_overlap", 100),
+            )
+
+        if enable_tracing:
+            with _ml.start_span("chunk_doc"):
+                _ml.set_tag("chunking_strategy", strategy)
+                _ml.set_tag("chunk_count", len(chunks))
+
+        print(
+            f" -> Chunking completed for path {result.get('path')}: produced {len(chunks)} chunks"
         )
-
-    print(f" -> Chunking completed for path {result.get('path')}: produced {len(chunks)} chunks")
-    return {"chunks": chunks, "path": result["path"], "error": None, "config": config}
+        return {"chunks": chunks, "path": result["path"], "error": None, "config": config}
 
 
 @task
@@ -189,24 +270,54 @@ def embed_doc(
     chunked_task = item["chunked"]
     result = chunked_task.result()
     config = result.get("config", {})
-    if result.get("error") or not result["chunks"]:
-        return {"embeddings": [], "path": result["path"], "error": result["error"], "config": config}
+    session_id = config.get("mlflow_session_id") if enable_tracing else None
 
-    chunks = result["chunks"]
-    texts = [c["content"] for c in chunks]
+    with session_context(session_id):
+        if result.get("error") or not result["chunks"]:
+            return {
+                "embeddings": [],
+                "path": result["path"],
+                "error": result["error"],
+                "config": config,
+            }
 
-    # display info
-    print(f" -> Embedding {len(texts)} chunks...")
+        chunks = result["chunks"]
+        texts = [c["content"] for c in chunks]
 
-    vectors = embed_texts(
-        texts,
-        config.get("embedding_model"),
-        config.get("embedding_base_url"),
-        config.get("embedding_api_key", ""),
-    )
+        # display info
+        print(f" -> Embedding {len(texts)} chunks...")
 
-    print(f" -> Produced {len(vectors)} embeddings.")
-    return {"chunks": chunks, "embeddings": vectors, "path": result["path"], "error": None, "config": config}
+        try:
+            vectors = embed_texts(
+                texts,
+                config.get("embedding_model"),
+                config.get("embedding_base_url"),
+                config.get("embedding_api_key", ""),
+            )
+            if enable_tracing:
+                with _ml.start_span("embed_doc"):
+                    _ml.set_tag(
+                        "embedding_model", config.get("embedding_model", "unknown")
+                    )
+                    _ml.set_tag("chunk_count", len(texts))
+                    _ml.set_tag("embedding_count", len(vectors))
+                    _ml.set_tag(
+                        "non_null_count", sum(1 for v in vectors if v is not None)
+                    )
+        except Exception as e:
+            if enable_tracing:
+                with _ml.start_span("embed_doc"):
+                    _ml.set_tag("error", str(e))
+            raise
+
+        print(f" -> Produced {len(vectors)} embeddings.")
+        return {
+            "chunks": chunks,
+            "embeddings": vectors,
+            "path": result["path"],
+            "error": None,
+            "config": config,
+        }
 
 
 def _max_concurrency_from_config(config: RunnableConfig) -> int:
@@ -230,14 +341,14 @@ def document_workflow(
 
     Parallelism is capped by ``config["configurable"]["max_concurrency"]`` (default:
     CPU count). Documents are processed in batches; each batch runs convert, chunk,
-    and embed for up to that many PDFs before the next batch starts.
+    and embed for up to that many documents before the next batch starts.
 
     Parameters
     ----------
     input_data : list[dict]
-        List of dicts, each with {"pdf_path": str, "config": dict}.
+        List of dicts, each with ``file_path`` (or legacy ``pdf_path``) and ``config``.
     config : RunnableConfig
-        Run config; ``configurable.max_concurrency`` limits parallel PDF pipelines.
+        Run config; ``configurable.max_concurrency`` limits parallel document pipelines.
 
     Returns
     -------
@@ -252,7 +363,12 @@ def document_workflow(
     for start in range(0, len(input_data), max_conc):
         batch = input_data[start : start + max_conc]
         converted = [
-            convert_doc({"pdf_path": i.get("pdf_path"), "config": i.get("config")})
+            convert_doc(
+                {
+                    "file_path": i.get("file_path") or i.get("pdf_path"),
+                    "config": i.get("config"),
+                }
+            )
             for i in batch
         ]
         chunked = [chunk_doc({"converted": t}) for t in converted]
