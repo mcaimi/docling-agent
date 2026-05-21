@@ -1,6 +1,6 @@
 # Docling Document Processing Agent
 
-LangGraph workflow that discovers documents (PDF, DOCX, XLSX, Markdown, HTML, LaTeX), converts them in **parallel batches** with **docling**, chunks text with overlap, and requests **OpenAI-compatible** embeddings per chunk. Optional **MLflow** tracing records runs, spans, and metrics when `ENABLE_TRACING=1`.
+LangGraph workflow that discovers documents (PDF, DOCX, XLSX, Markdown, HTML, LaTeX), converts them in **parallel batches** with **docling**, chunks text with overlap, requests **OpenAI-compatible** embeddings per chunk, and optionally persists vectors to **Chroma** or **Milvus** via LangChain connectors. Optional **MLflow** tracing records runs, spans, and metrics when `ENABLE_TRACING=1`.
 
 ## Setup
 
@@ -10,11 +10,15 @@ LangGraph workflow that discovers documents (PDF, DOCX, XLSX, Markdown, HTML, La
 
    ```bash
    uv sync
+   # Optional vector DB backends:
+   uv sync --extra chroma      # Chroma only
+   uv sync --extra milvus      # Milvus only
+   uv sync --extra vector-stores
    ```
 
 3. **Environment**: Create a `.env` file in the project root (see `.env` for the full list of configurable variables). All settings can also be overridden via shell environment variables.
 
-4. **MLflow (optional)**: For tracing, set `ENABLE_TRACING=1`, point `MLFLOW_TRACKING_URI` at your server (default `http://localhost:5000`), and set `MLFLOW_EXPERMENT_NAME` (default **Docling Agent**). Pipeline worker modules read `ENABLE_TRACING` from the environment at import time, so load `.env` (or export the variable) before importing graph modules if spans should appear inside `convert_doc` / `chunk_doc` / `embed_doc`.
+4. **MLflow (optional)**: For tracing, set `ENABLE_TRACING=1`, point `MLFLOW_TRACKING_URI` at your server (default `http://localhost:5000`), and set `MLFLOW_EXPERMENT_NAME` (default **Docling Agent**). Pipeline worker modules read `ENABLE_TRACING` from the environment at import time, so load `.env` (or export the variable) before importing graph modules if spans should appear inside `convert_doc` / `chunk_doc` / `embed_doc` / `store_doc`.
 
 ## Usage
 
@@ -45,7 +49,8 @@ result = process_documents(agent_settings)
 # result merges resolved agent_settings with:
 #   documents      — list of chunk records (content + metadata)
 #   embeddings     — list[list[float] | None], one per chunk
-#   error_reports  — list of {"path", "error"} for files that failed
+#   vectors_stored — count of chunk vectors written when vector_store_backend is set
+#   error_reports  — list of {"path", "error", "stage"} for pipeline or vector_store failures
 chunks = result["documents"]
 vectors = result["embeddings"]
 if result.get("error_reports"):
@@ -90,6 +95,15 @@ When `enable_tracing` is truthy in loaded settings, the CLI calls `process_docum
 | `MLFLOW_TRACKING_URI` | `http://localhost:5000` | Tracking server URL → `mlflow_tracking_uri` |
 | `MLFLOW_EXPERMENT_NAME` | `Docling Agent` | Experiment name → `mlflow_experiment_name` (env key spelling matches `agent_settings.py`) |
 | `MLFLOW_SESSION_ID` | _(unset)_ | Optional trace session override → `mlflow_session_id`; CLI default is the active run’s `run_id` |
+| `VECTOR_STORE_BACKEND` | `none` | `none`, `chroma`, or `milvus` (opt-in persistence) |
+| `VECTOR_STORE_COLLECTION` | `docling_chunks` | Collection name in Chroma/Milvus |
+| `CHROMA_HOST` | _(unset)_ | Remote Chroma server host (optional) |
+| `CHROMA_PORT` | `8000` | Remote Chroma server port |
+| `CHROMA_PERSIST_DIRECTORY` | _(unset)_ | Local Chroma persistence directory |
+| `MILVUS_URI` | `http://localhost:19530` | Milvus server URI or Milvus Lite file path |
+| `MILVUS_TOKEN` | _(unset)_ | Milvus auth token |
+| `MILVUS_DB_NAME` | `default` | Milvus database name |
+| `VECTOR_STORE_BATCH_SIZE` | `200` | Max vectors per insert sub-batch |
 
 ## Supported formats
 
@@ -116,10 +130,11 @@ flowchart TB
         convert[convert_doc]
         chunk[chunk_doc]
         embed[embed_doc]
-        convert --> chunk --> embed
+        store[store_doc]
+        convert --> chunk --> embed --> store
     end
     invoke --> perDoc
-    perDoc --> merge["Merge documents, embeddings,<br/>error_reports + config keys"]
+    perDoc --> merge["Merge documents, embeddings,<br/>vectors_stored, error_reports + config"]
     merge -.-> mlflow[MLflow optional]
 ```
 
@@ -130,12 +145,13 @@ flowchart LR
     input["file_path + config"] --> convert_doc
     convert_doc --> chunk_doc
     chunk_doc --> embed_doc
-    embed_doc --> output["chunks + embeddings + path + error"]
+    embed_doc --> store_doc
+    store_doc --> output["chunks + embeddings + stored_count + path + error"]
 ```
 
 Each document gets its own `DocumentConverter` instance inside `convert_doc` (no shared singleton). Tasks are defined with `langgraph.func` (`@task`, `@entrypoint`) in `src/graph/document_pipeline.py`.
 
-`document_workflow` slices `input_data` into batches of size `max_concurrency` (from `config["configurable"]["max_concurrency"]`, validated by `_max_concurrency_from_config`; default CPU count, minimum 1). Each batch launches all `convert_doc` tasks, then all `chunk_doc`, then all `embed_doc`, before the next batch starts.
+`document_workflow` slices `input_data` into batches of size `max_concurrency` (from `config["configurable"]["max_concurrency"]`, validated by `_max_concurrency_from_config`; default CPU count, minimum 1). Each batch launches all `convert_doc` tasks, then all `chunk_doc`, then all `embed_doc`, then all `store_doc`, before the next batch starts. Vector storage is skipped when `vector_store_backend` is `none`; precomputed embeddings are inserted via `langchain-chroma` or `langchain-milvus` without re-embedding.
 
 Pipeline items use `file_path` (legacy `pdf_path` still accepted in `document_pipeline`).
 
@@ -166,6 +182,8 @@ classDiagram
         +str mlflow_tracking_uri
         +str mlflow_experiment_name
         +str mlflow_session_id
+        +str vector_store_backend
+        +str vector_store_collection
         +str user_prompt
     }
 
@@ -173,6 +191,7 @@ classDiagram
         <<dict>>
         +list documents
         +list embeddings
+        +int vectors_stored
         +list error_reports
         +AgentConfig keys
     }
@@ -182,6 +201,7 @@ classDiagram
         +convert_doc(item) dict
         +chunk_doc(item) dict
         +embed_doc(item) dict
+        +store_doc(item) dict
         -_new_converter(...) DocumentConverter
         -_result_to_record(...) dict
         -_max_concurrency_from_config(config) int
@@ -203,6 +223,11 @@ classDiagram
         +get_embedding_client(url, key) OpenAI
     }
 
+    class vector_store {
+        +get_vector_store(config) VectorStore
+        +store_chunk_embeddings(store, chunks, embeddings) dict
+    }
+
     class document_paths {
         +list_document_paths(folder) list
     }
@@ -216,6 +241,7 @@ classDiagram
     docling_agent --> document_pipeline : batched invoke
     document_pipeline --> chunking : chunk_doc
     document_pipeline --> embeddings : embed_doc
+    document_pipeline --> vector_store : store_doc
 ```
 
 ### Module structure
@@ -223,11 +249,12 @@ classDiagram
 | Module | Role |
 |--------|------|
 | [`src/docling_agent.py`](src/docling_agent.py) | `process_documents`, CLI — NLP extraction, document discovery, pipeline invoke, result merge; CLI MLflow run when `enable_tracing` |
-| [`src/graph/document_pipeline.py`](src/graph/document_pipeline.py) | `@task` / `@entrypoint` batched pipeline: `convert_doc` → `chunk_doc` → `embed_doc`; standard multi-format + VLM (PDF); MLflow spans when `ENABLE_TRACING=1` |
+| [`src/graph/document_pipeline.py`](src/graph/document_pipeline.py) | `@task` / `@entrypoint` batched pipeline: `convert_doc` → `chunk_doc` → `embed_doc` → `store_doc`; standard multi-format + VLM (PDF); MLflow spans when `ENABLE_TRACING=1` |
+| [`src/graph/vector_store.py`](src/graph/vector_store.py) | `get_vector_store`, `store_chunk_embeddings` — LangChain Chroma/Milvus connectors; precomputed embedding inserts |
 | [`src/graph/chunking.py`](src/graph/chunking.py) | `chunk_document_records` (fixed-size on markdown `content`); `chunk_document_records_hybrid` (uses `docling_document` + `HybridChunker.contextualize`); spans `chunk_fixed` / `chunk_hybrid` |
 | [`src/graph/embeddings.py`](src/graph/embeddings.py) | `embed_texts`, singleton `get_embedding_client`; span `embed_texts` with success/failure tags |
 | [`src/graph/prompt_extraction.py`](src/graph/prompt_extraction.py) | `extract_config_from_prompt`, `merge_overrides` |
-| [`src/graph/prompts/extractor.py`](src/graph/prompts/extractor.py) | System prompt; 15 NLP-extractable keys in `_CONFIG_KEYS` (`vlm_api_params` is env-only) |
+| [`src/graph/prompts/extractor.py`](src/graph/prompts/extractor.py) | System prompt; NLP-extractable keys in `_CONFIG_KEYS` (`vlm_api_params` and vector DB connection secrets are env-only) |
 | [`src/graph/document_paths.py`](src/graph/document_paths.py) | `list_document_paths` — globs for supported extensions; span `list_documents` |
 | [`src/setup/agent_settings.py`](src/setup/agent_settings.py) | `load_environment_variables` — `.env` via `python-dotenv`; maps tracing and MLflow env vars |
 | [`src/utils/json_parse.py`](src/utils/json_parse.py) | `_parse_json_object_str` for VLM headers/params env vars |
@@ -244,8 +271,9 @@ Removed modules (do not reference): `graph_state.py`, `graph_nodes.py`, `pdf_con
    - **Convert** (`convert_doc`): Fresh `DocumentConverter` per task via `_new_converter`. Standard pipeline handles PDF, DOCX, XLSX, Markdown, HTML, and LaTeX; VLM applies to PDF only (`_effective_pipeline` falls back to standard for other extensions). Output record: `content` (markdown), `docling_document`, `metadata` (`file_path`, `file_name`, `page_count`, `title`, `conversion_pipeline`). Errors return `doc: None` and an `error` string. Span `convert_pdf` when tracing is on.
    - **Chunk** (`chunk_doc`): `fixed` chunks markdown `content` with `chunk_size`/`chunk_overlap`; `hybrid` chunks `docling_document` via docling `HybridChunker`. Metadata extended with `chunk_index`, `chunk_count`. Span `chunk_doc`.
    - **Embed** (`embed_doc`): One embedding per chunk via `embed_texts`; per-chunk API errors yield `None` at that index. Span `embed_doc`.
-   - **Batching**: `for start in range(0, len(input_data), max_conc)` — each iteration processes up to `max_conc` documents through convert → chunk → embed in parallel.
-4. **Aggregate** (`src/docling_agent.py`): Flatten all chunks into `documents`, all vectors into `embeddings`, collect failures into `error_reports`, and spread remaining `agent_settings` keys into the result dict.
+   - **Store** (`store_doc`): When `vector_store_backend` is `chroma` or `milvus`, writes precomputed vectors via LangChain connectors; skips `None` embeddings; stable IDs `{file_path}#chunk_{chunk_index}`. Span `store_doc`. No-op when backend is `none`.
+   - **Batching**: `for start in range(0, len(input_data), max_conc)` — each iteration processes up to `max_conc` documents through convert → chunk → embed → store in parallel.
+4. **Aggregate** (`src/docling_agent.py`): Flatten all chunks into `documents`, all vectors into `embeddings`, sum `vectors_stored`, collect failures into `error_reports` (with `stage`: `pipeline` or `vector_store`), and spread remaining `agent_settings` keys into the result dict.
 
 ## MLflow tracing
 
@@ -263,7 +291,7 @@ When `agent_settings["enable_tracing"]` is truthy:
 - Optional env `MLFLOW_SESSION_ID` overrides the default session id
 - Sanitized params logged (excludes `api_key`, `embedding_api_key`, `vlm_api_headers`, `vlm_api_params`)
 - Spans: `NLP prompt extraction`, `document discovery`, `Parallel pipeline`, `Results aggregation`
-- Metrics: `document_count`, `total_chunks`, `total_embeddings`, `error_count`, `non_null_embeddings`
+- Metrics: `document_count`, `total_chunks`, `total_embeddings`, `vectors_stored`, `error_count`, `vector_store_error_count`, `non_null_embeddings`
 - Artifact: `error_reports.json` when `error_reports` is non-empty
 - Tag `nlp_extracted_keys` when NLP overrides apply
 
@@ -276,6 +304,7 @@ When `agent_settings["enable_tracing"]` is truthy:
 | `document_pipeline` | `convert_pdf` | `pipeline`, `file`, `page_count` or `error` |
 | `document_pipeline` | `chunk_doc` | `chunking_strategy`, `chunk_count` |
 | `document_pipeline` | `embed_doc` | `embedding_model`, `chunk_count`, `embedding_count`, `non_null_count` or `error` |
+| `document_pipeline` | `store_doc` | `backend`, `stored_count`, `skipped_count`, `file` or `error` |
 | `chunking` | `chunk_fixed` | `chunk_size`, `chunk_overlap`, `total_chunks` |
 | `chunking` | `chunk_hybrid` | `total_chunks` |
 | `embeddings` | `embed_texts` | `model`, `text_count`, `embedding_dimensions`, `success_count`, `failure_count` |
@@ -286,12 +315,13 @@ Filter grouped traces in the MLflow UI: ``metadata.`mlflow.trace.session` = '<ru
 ## Conventions for agents
 
 - **Entry point**: `process_documents(agent_settings: dict, *, enable_tracing: bool = False) -> dict`. Config is a plain dict throughout; there is no `PDFProcessorState` TypedDict or compiled `StateGraph`.
-- **Return shape**: Besides `documents`, `embeddings`, and `error_reports`, the dict includes all keys from the resolved `agent_settings` except `documents` and `embeddings` (useful for inspecting NLP merges and final config).
+- **Return shape**: Besides `documents`, `embeddings`, `vectors_stored`, and `error_reports`, the dict includes all keys from the resolved `agent_settings` except `documents` and `embeddings` (useful for inspecting NLP merges and final config).
+- **Vector storage**: Opt-in via `vector_store_backend`; uses precomputed embeddings (no second embed call). Install `uv sync --extra chroma` or `--extra milvus` before enabling.
 - **Extend the pipeline** by adding or modifying `@task` functions in `document_pipeline.py`, not by wiring LangGraph nodes in a central graph.
 - **Per-file isolation**: Conversion failures do not abort other documents; check `error_reports` in the result.
 - **Hybrid chunking** requires `docling_document` on the conversion record; fixed chunking uses markdown `content`.
 - **VLM pipeline**: PDF only; `CONVERSION_PIPELINE=vlm` with non-PDF files uses standard conversion automatically.
-- **NLP extraction** covers 15 keys (`_CONFIG_KEYS` in `extractor.py`); `vlm_api_params` is only set via env/config dict, not the LLM extractor.
+- **NLP extraction** covers keys in `_CONFIG_KEYS` (`extractor.py`); `vlm_api_params` and vector DB connection secrets are only set via env/config dict, not the LLM extractor.
 - **Concurrency**: `max_concurrency` limits parallel documents **per batch**, not unbounded fan-out across the full file list.
 - **Pipeline input**: Prefer `{"file_path": str, "config": dict}`; `pdf_path` is legacy but still accepted.
 - **Tracing**: Set `ENABLE_TRACING=1` in `.env` before worker imports for task spans; pass `enable_tracing=True` to `process_documents` (or use the CLI with `enable_tracing` in settings) for top-level runs and metrics. Session id defaults to the run’s `run_id` and is passed to workers via `agent_settings["mlflow_session_id"]`. Configure `MLFLOW_TRACKING_URI` and `MLFLOW_EXPERMENT_NAME` (note env spelling). Do not log secrets as MLflow params.
@@ -306,6 +336,12 @@ Declared in `pyproject.toml`:
 - `mlflow>=3.12.0`
 - `openai>=2.30.0`
 - `python-dotenv>=1.2.2`
+
+Optional extras:
+
+- `chroma`: `langchain-chroma`, `chromadb`
+- `milvus`: `langchain-milvus`, `pymilvus`
+- `vector-stores`: both backends
 
 ## License
 
