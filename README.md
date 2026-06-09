@@ -101,7 +101,7 @@ With `ENABLE_TRACING=1`, the CLI connects to `mlflow_tracking_uri`, uses `mlflow
 | `MAX_CONCURRENCY` | CPU count (`os.cpu_count()`) | Max documents processed in parallel per batch |
 | `ENABLE_TRACING` | `0` | Set to `1` to enable MLflow tracing in the CLI and pipeline modules |
 | `MLFLOW_TRACKING_URI` | `http://localhost:5000` | MLflow tracking server URL (CLI tracing path) |
-| `MLFLOW_EXPERMENT_NAME` | `Docling Agent` | MLflow experiment name (env key spelling matches code) |
+| `MLFLOW_EXPERIMENT_NAME` | `Docling Agent` | MLflow experiment name |
 | `MLFLOW_SESSION_ID` | _(unset)_ | Optional trace session id; CLI default is the active run’s `run_id` |
 | `VECTOR_STORE_BACKEND` | `none` | `none`, `chroma`, or `milvus` (opt-in persistence) |
 | `VECTOR_STORE_COLLECTION` | `docling_chunks` | Collection name in Chroma/Milvus |

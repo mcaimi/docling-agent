@@ -81,7 +81,7 @@ def _get_settings_from_environment():
         "max_concurrency": _int_setting("MAX_CONCURRENCY", os.cpu_count()),
         "enable_tracing": _int_setting("ENABLE_TRACING", 0),
         "mlflow_tracking_uri": _str_setting("MLFLOW_TRACKING_URI", "http://localhost:5000"),
-        "mlflow_experiment_name": _str_setting("MLFLOW_EXPERMENT_NAME", "Docling Agent"),
+        "mlflow_experiment_name": _str_setting("MLFLOW_EXPERIMENT_NAME", "Docling Agent"),
         "mlflow_session_id": _strip_or_none("MLFLOW_SESSION_ID"),
         "vector_store_backend": _str_setting("VECTOR_STORE_BACKEND", "none"),
         "vector_store_collection": _str_setting(
