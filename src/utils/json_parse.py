@@ -11,7 +11,7 @@ def _parse_json_object_env(var_name: str) -> dict[str, Any]:
     if not raw_env or not raw_env.strip():
         return {}
     try:
-        out = json.loads(raw)
+        out = json.loads(raw_env)
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in {var_name}: {e}") from e
     if not isinstance(out, dict):
