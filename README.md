@@ -103,17 +103,150 @@ With `ENABLE_TRACING=1`, the CLI connects to `mlflow_tracking_uri`, uses `mlflow
 | `MLFLOW_TRACKING_URI` | `http://localhost:5000` | MLflow tracking server URL (CLI tracing path) |
 | `MLFLOW_EXPERIMENT_NAME` | `Docling Agent` | MLflow experiment name |
 | `MLFLOW_SESSION_ID` | _(unset)_ | Optional trace session id; CLI default is the active run’s `run_id` |
+| **Vector Store Configuration** | | |
 | `VECTOR_STORE_BACKEND` | `none` | `none`, `chroma`, or `milvus` (opt-in persistence) |
 | `VECTOR_STORE_COLLECTION` | `docling_chunks` | Collection name in Chroma/Milvus |
+| `VECTOR_STORE_WRITE_MODE` | `insert` | Write behavior: `insert`, `upsert`, or `skip_existing` |
+| `VECTOR_STORE_BATCH_SIZE` | `200` | Max vectors per insert sub-batch |
+| `VECTOR_STORE_MAX_BATCH_WORKERS` | `4` | Number of parallel batch workers |
+| **Vector Store Resilience** | | |
+| `VECTOR_STORE_RETRY_ATTEMPTS` | `3` | Max retries for transient failures |
+| `VECTOR_STORE_RETRY_BACKOFF_MULTIPLIER` | `1` | Exponential backoff multiplier |
+| `VECTOR_STORE_CIRCUIT_BREAKER_THRESHOLD` | `5` | Failures before circuit opens |
+| `VECTOR_STORE_CIRCUIT_BREAKER_TIMEOUT` | `60` | Seconds before retry after circuit open |
+| **ChromaDB Configuration** | | |
 | `CHROMA_HOST` | _(unset)_ | Remote Chroma server host (optional) |
 | `CHROMA_PORT` | `8000` | Remote Chroma server port |
 | `CHROMA_PERSIST_DIRECTORY` | _(unset)_ | Local Chroma persistence directory |
+| `CHROMA_DISTANCE_FUNCTION` | `cosine` | Distance metric: `l2`, `cosine`, `ip` |
+| `CHROMA_COLLECTION_METADATA` | `{}` | JSON object of collection metadata |
+| `CHROMA_ALLOW_RESET` | `0` | Enable collection reset for testing |
+| **Milvus Configuration** | | |
 | `MILVUS_URI` | `http://localhost:19530` | Milvus server URI or Milvus Lite file path |
 | `MILVUS_TOKEN` | _(unset)_ | Milvus auth token |
 | `MILVUS_DB_NAME` | `default` | Milvus database name |
-| `VECTOR_STORE_BATCH_SIZE` | `200` | Max vectors per insert sub-batch |
+| `MILVUS_INDEX_TYPE` | `HNSW` | Index type: `IVF_FLAT`, `HNSW`, `DISKANN` |
+| `MILVUS_METRIC_TYPE` | `COSINE` | Similarity metric: `L2`, `IP`, `COSINE` |
+| `MILVUS_INDEX_PARAMS` | `{}` | JSON object of index parameters |
+| `MILVUS_CONSISTENCY_LEVEL` | `Bounded` | Consistency level: `Strong`, `Bounded`, `Eventually` |
+| `MILVUS_PARTITION_NAME` | _(unset)_ | Optional partition name |
 
 Vector persistence uses **precomputed** embeddings from the pipeline (no second embed call). Chunk IDs are stable: `{file_path}#chunk_{chunk_index}`. Chroma/Milvus connection settings are env-only and are not extracted from natural-language prompts.
+
+## Vector Store CRUD Operations
+
+The vector store module now supports full CRUD (Create, Read, Update, Delete) operations:
+
+### Insert (Create)
+```python
+from src.graph.vector_store import get_or_create_vector_store, store_chunk_embeddings
+
+vector_store = get_or_create_vector_store(config)
+result = store_chunk_embeddings(
+    vector_store,
+    chunks,
+    embeddings,
+    batch_size=200,
+    write_mode="insert",  # Default: creates new records
+    max_workers=4,        # Parallel batch processing
+    config=config,
+)
+print(f"Stored: {result['stored_count']}, Skipped: {result['skipped_count']}")
+```
+
+### Upsert (Update or Insert)
+```python
+# Upsert mode: updates existing records or inserts new ones
+result = store_chunk_embeddings(
+    vector_store,
+    chunks,
+    embeddings,
+    write_mode="upsert",  # Deletes existing IDs, then inserts
+    config=config,
+)
+print(f"Upserted: {result['upserted_count']}")
+```
+
+### Query (Read)
+```python
+from src.graph.vector_store import query_vector_store
+
+results = query_vector_store(
+    vector_store,
+    query="What is machine learning?",
+    k=5,  # Number of results
+    metadata_filter={"file_path": "/path/to/doc.pdf"},  # Optional filter
+    embedding_config={
+        "embedding_model": "text-embedding-ada-002",
+        "embedding_base_url": "https://api.openai.com/v1",
+        "embedding_api_key": "your-key",
+    },
+    config=config,
+)
+
+for result in results:
+    print(f"Content: {result['content']}")
+    print(f"Metadata: {result['metadata']}")
+    print(f"Score: {result['score']}")
+```
+
+### Delete
+```python
+from src.graph.vector_store import delete_chunk_embeddings
+
+# Delete by specific chunk IDs
+result = delete_chunk_embeddings(
+    vector_store,
+    ids=["file.pdf#chunk_0", "file.pdf#chunk_1"],
+    config=config,
+)
+
+# Delete all chunks from a document
+result = delete_chunk_embeddings(
+    vector_store,
+    file_paths=["/path/to/doc.pdf"],
+    config=config,
+)
+
+# Delete by metadata filter
+result = delete_chunk_embeddings(
+    vector_store,
+    metadata_filters={"conversion_pipeline": "old_version"},
+    config=config,
+)
+print(f"Deleted: {result['deleted_count']}")
+```
+
+### Higher-Level Operations
+```python
+from src.graph.vector_operations import delete_document, replace_document_chunks
+
+# Delete all chunks from a document
+delete_document(vector_store, "/path/to/doc.pdf", config)
+
+# Replace document with updated version
+replace_document_chunks(
+    vector_store,
+    "/path/to/doc.pdf",
+    new_chunks,
+    new_embeddings,
+    config,
+)
+```
+
+### Write Modes
+
+- **`insert`** (default): Creates new records. Behavior on duplicate IDs is backend-dependent
+- **`upsert`**: Deletes existing records with matching IDs, then inserts (idempotent)
+- **`skip_existing`**: Only inserts chunks with IDs that don't already exist
+
+### Performance Features
+
+- **Connection pooling**: Vector store instances are cached and reused across calls
+- **Parallel batch processing**: Configurable worker threads for concurrent batch inserts
+- **Retry with exponential backoff**: Automatic retry for transient failures (connection errors, timeouts)
+- **Circuit breaker**: Prevents cascading failures when vector store is unavailable
+- **Enhanced metrics**: MLflow tracing includes throughput, retry counts, batch durations
 
 ## Supported formats
 
@@ -172,14 +305,48 @@ Configure the tracking server and experiment via `MLFLOW_TRACKING_URI` and `MLFL
 
 - `src/docling_agent.py` — entry point (`process_documents`, CLI, optional MLflow orchestration)
 - `src/graph/document_pipeline.py` — batched parallel per-document convert/chunk/embed/store pipeline
-- `src/graph/vector_store.py` — `get_vector_store`, `store_chunk_embeddings` (Chroma/Milvus, precomputed vectors)
+- `src/graph/vector_store.py` — full CRUD operations: insert, upsert, query, delete (Chroma/Milvus, precomputed vectors)
+- `src/graph/vector_operations.py` — higher-level operations: delete documents, replace chunks, version management
 - `src/graph/chunking.py` — fixed-size and hybrid chunking
-- `src/graph/embeddings.py` — OpenAI-compatible embedding client
+- `src/graph/embeddings.py` — OpenAI-compatible embedding client with connection pooling
 - `src/graph/prompt_extraction.py` — NLP config extraction from natural language
 - `src/graph/document_paths.py` — document discovery
-- `src/setup/agent_settings.py` — `.env` loading
+- `src/setup/agent_settings.py` — `.env` loading with all configuration options
 - `src/utils/uuids.py` — `generate_mlflow_run_name` for unique CLI run names
 - `src/utils/mlflow_tracing.py` — `session_context` for MLflow trace session grouping
+- `src/utils/circuit_breaker.py` — circuit breaker pattern for resilience
+
+## Testing
+
+Comprehensive test suite with unit and integration tests:
+
+### Unit Tests
+```bash
+uv run pytest tests/unit/ -v
+```
+
+- Circuit breaker pattern (10 tests)
+- Vector store operations (mocked)
+
+### Integration Tests
+
+Requires Docker for Milvus and ChromaDB:
+
+```bash
+# Start services
+cd tests && docker-compose up -d
+
+# Run tests
+uv run pytest tests/integration/ -v
+```
+
+**Coverage:**
+- Full CRUD operations for Milvus and ChromaDB
+- Performance benchmarks (throughput, parallel processing)
+- Connection pooling, retry logic, circuit breaker
+- Backend-specific configurations
+
+See [tests/README.md](tests/README.md) for detailed instructions.
 
 ## Dependencies
 
@@ -191,12 +358,14 @@ Declared in `pyproject.toml`:
 - `mlflow>=3.12.0`
 - `openai>=2.30.0`
 - `python-dotenv>=1.2.2`
+- `tenacity>=9.0.0` (retry with exponential backoff)
 
 Optional extras:
 
-- `chroma`: `langchain-chroma`
-- `milvus`: `langchain-milvus`
+- `chroma`: `langchain-chroma>=1.1.0`
+- `milvus`: `langchain-milvus>=0.3.3`
 - `vector-stores`: both backends
+- `dev`: `pytest>=8.0.0`, `pytest-asyncio>=0.23.0`, `requests>=2.31.0`
 
 ## License
 

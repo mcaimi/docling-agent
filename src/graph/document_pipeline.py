@@ -370,24 +370,46 @@ def store_doc(item: dict) -> dict:
                 return base
 
             batch_size = max(1, int(config.get("vector_store_batch_size", 200)))
+            write_mode = config.get("vector_store_write_mode", "insert")
+            max_workers = max(1, int(config.get("vector_store_max_batch_workers", 4)))
+
             store_result = store_chunk_embeddings(
                 vector_store,
                 result["chunks"],
                 result["embeddings"],
                 batch_size=batch_size,
+                write_mode=write_mode,
+                max_workers=max_workers,
+                config=config,
             )
             stored_count = store_result["stored_count"]
             skipped = store_result["skipped_count"]
+            upserted = store_result.get("upserted_count", 0)
+            retry_count = store_result.get("retry_count", 0)
+            failed_chunks = store_result.get("failed_chunks", [])
 
             if enable_tracing:
                 with _ml.start_span("store_doc"):
                     _ml.set_tag("backend", backend)
                     _ml.set_tag("file", os.path.basename(result["path"]))
+                    _ml.set_tag("write_mode", write_mode)
                     _ml.set_tag("stored_count", stored_count)
                     _ml.set_tag("skipped_count", skipped)
+                    _ml.set_tag("upserted_count", upserted)
+                    _ml.set_tag("retry_count", retry_count)
+                    _ml.set_tag("failed_count", len(failed_chunks))
 
-            print(f" -> Stored {stored_count} vectors ({skipped} skipped).")
-            return {**base, "stored_count": stored_count}
+            print(
+                f" -> Stored {stored_count} vectors ({skipped} skipped, "
+                f"{upserted} upserted, {retry_count} retries, {len(failed_chunks)} failed)."
+            )
+            return {
+                **base,
+                "stored_count": stored_count,
+                "upserted_count": upserted,
+                "retry_count": retry_count,
+                "failed_chunks": failed_chunks,
+            }
         except Exception as e:
             if enable_tracing:
                 with _ml.start_span("store_doc"):
