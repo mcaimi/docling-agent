@@ -19,6 +19,8 @@ _CONFIG_KEYS = [
     "vlm_api_url",
     "vlm_api_headers",
     "vlm_preset",
+    "vector_store_backend",
+    "vector_store_collection",
 ]
 
 _SYSTEM_PROMPT = (
