@@ -9,6 +9,7 @@ except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
 
 import os
+from typing import Any
 
 # check if tracing is enabled
 enable_tracing = int(os.getenv("ENABLE_TRACING", "0")) == 1
@@ -59,7 +60,7 @@ def get_embedding_client(base_url: str, api_key: str) -> OpenAI:
 
 
 def _embed_batch(
-    client: OpenAI, texts: list[str], model: str
+    client: OpenAI, texts: list[str], model: str, dimensions: int | None = None
 ) -> list[list[float] | None]:
     """
     Embed a single batch of texts (up to _EMBEDDING_BATCH_SIZE items).
@@ -67,11 +68,11 @@ def _embed_batch(
     Returns embeddings in the same order as input texts. On API error, all
     positions in this batch are set to None.
     """
+    kwargs: dict[str, Any] = {"input": texts, "model": model}
+    if dimensions is not None:
+        kwargs["dimensions"] = dimensions
     try:
-        response = client.embeddings.create(
-            input=texts,
-            model=model,
-        )
+        response = client.embeddings.create(**kwargs)
         # Sort by index to ensure correct order (API may return out of order)
         sorted_embeddings = sorted(response.data, key=lambda x: x.index)
         return [item.embedding for item in sorted_embeddings]
@@ -84,7 +85,11 @@ def _embed_batch(
 # uses the embedding client to generate embeddings for the texts
 # returns a list of embeddings
 def embed_texts(
-    texts: list[str], model: str, base_url: str, api_key: str
+    texts: list[str],
+    model: str,
+    base_url: str,
+    api_key: str,
+    dimensions: int | None = None,
 ) -> list[list[float] | None]:
     """
     Request embeddings for all texts using batched API calls.
@@ -92,6 +97,11 @@ def embed_texts(
     Splits input into batches of up to 2048 items (OpenAI API limit) and makes
     parallel-capable requests. On API errors for a batch, those positions are
     ``None`` and the error is printed.
+
+    ``dimensions``, when set, is passed through to the provider's embeddings
+    request. Only a subset of embedding models (e.g. OpenAI's
+    ``text-embedding-3-*`` family) accept this parameter -- leave it unset
+    (the default) for models that don't.
 
     Returns embeddings in the same order as input texts.
     """
@@ -105,7 +115,7 @@ def embed_texts(
     # Process in batches
     for i in range(0, len(texts), _EMBEDDING_BATCH_SIZE):
         batch = texts[i : i + _EMBEDDING_BATCH_SIZE]
-        batch_embeddings = _embed_batch(client, batch, model)
+        batch_embeddings = _embed_batch(client, batch, model, dimensions)
         all_embeddings.extend(batch_embeddings)
 
         # Capture dimensions from first successful embedding
@@ -129,7 +139,13 @@ def embed_texts(
     return all_embeddings
 
 
-def embed_single_text(text: str, model: str, base_url: str, api_key: str) -> list[float] | None:
+def embed_single_text(
+    text: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+    dimensions: int | None = None,
+) -> list[float] | None:
     """
     Embed a single text string.
 
@@ -143,11 +159,13 @@ def embed_single_text(text: str, model: str, base_url: str, api_key: str) -> lis
         OpenAI-compatible API base URL
     api_key : str
         API key for authentication
+    dimensions : int | None
+        Optional custom embedding dimension (only supported by some models)
 
     Returns
     -------
     list[float] | None
         Embedding vector, or None if the API call fails
     """
-    result = embed_texts([text], model, base_url, api_key)
+    result = embed_texts([text], model, base_url, api_key, dimensions)
     return result[0] if result else None

@@ -8,10 +8,10 @@ def generate_uuid() -> str:
     """Generate a new UUID."""
     return str(uuid.uuid4())
 
-def is_valid_uuid(uuid: str) -> bool:
+def is_valid_uuid(candidate: str) -> bool:
     """Check if a string is a valid UUID."""
     try:
-        uuid.UUID(uuid)
+        uuid.UUID(candidate)
         return True
     except ValueError:
         return False

@@ -56,12 +56,17 @@ def _aggregate_pipeline_results(
     agent_settings: dict[str, Any],
     pipeline_result: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    documents, embeddings, errors = [], [], []
+    documents, embeddings, errors, failed_chunks = [], [], [], []
     vectors_stored = 0
+    vectors_upserted = 0
+    retry_count = 0
     for item in pipeline_result:
         documents.extend(item.get("chunks", []))
         embeddings.extend(item.get("embeddings", []))
         vectors_stored += item.get("stored_count", 0)
+        vectors_upserted += item.get("upserted_count", 0)
+        retry_count += item.get("retry_count", 0)
+        failed_chunks.extend(item.get("failed_chunks", []))
         if item.get("error"):
             errors.append(
                 {"path": item["path"], "error": item["error"], "stage": "pipeline"}
@@ -79,6 +84,9 @@ def _aggregate_pipeline_results(
         "documents": documents,
         "embeddings": embeddings,
         "vectors_stored": vectors_stored,
+        "vectors_upserted": vectors_upserted,
+        "retry_count": retry_count,
+        "failed_chunks": failed_chunks,
         "error_reports": errors,
         **{
             k: v
@@ -164,6 +172,9 @@ def _run_workflow_with_mlflow(agent_settings: dict[str, Any]) -> dict[str, Any]:
                 mlflow.log_metric("total_chunks", len(documents))
                 mlflow.log_metric("total_embeddings", len(embeddings))
                 mlflow.log_metric("vectors_stored", vectors_stored)
+                mlflow.log_metric("vectors_upserted", final_result["vectors_upserted"])
+                mlflow.log_metric("vector_store_retry_count", final_result["retry_count"])
+                mlflow.log_metric("failed_chunk_count", len(final_result["failed_chunks"]))
                 mlflow.log_metric("error_count", len(errors))
                 mlflow.log_metric(
                     "vector_store_error_count",

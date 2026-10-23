@@ -62,7 +62,7 @@ class _NoOpEmbeddings(Embeddings):
 class QueryEmbeddings(Embeddings):
     """Embeddings class for query-time vector generation using OpenAI-compatible API."""
 
-    def __init__(self, model: str, base_url: str, api_key: str):
+    def __init__(self, model: str, base_url: str, api_key: str, dimensions: int | None = None):
         """
         Initialize query embeddings.
 
@@ -74,10 +74,14 @@ class QueryEmbeddings(Embeddings):
             OpenAI-compatible API base URL
         api_key : str
             API key for authentication
+        dimensions : int | None
+            Must match whatever dimension was used to embed the stored chunks,
+            or similarity search against the vector store will fail/be meaningless.
         """
         self.model = model
         self.base_url = base_url
         self.api_key = api_key
+        self.dimensions = dimensions
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed a list of documents."""
@@ -86,7 +90,7 @@ class QueryEmbeddings(Embeddings):
         except ImportError as e:
             raise ImportError(f"embeddings module required: {e}") from e
 
-        vectors = embed_texts(texts, self.model, self.base_url, self.api_key)
+        vectors = embed_texts(texts, self.model, self.base_url, self.api_key, self.dimensions)
         # Filter out None values and return only valid embeddings
         return [v for v in vectors if v is not None]
 
@@ -795,6 +799,7 @@ def query_vector_store(
         model=embedding_config.get("embedding_model", "text-embedding-ada-002"),
         base_url=embedding_config.get("embedding_base_url", "https://api.openai.com/v1"),
         api_key=embedding_config.get("embedding_api_key", ""),
+        dimensions=embedding_config.get("embedding_dimensions"),
     )
 
     # Get circuit breaker

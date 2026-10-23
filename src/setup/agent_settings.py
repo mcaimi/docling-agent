@@ -46,6 +46,20 @@ def _int_setting(key: str, default: int) -> int:
         return default
 
 
+# same as _int_setting, but unset/invalid means "no override" (None) rather than
+# a numeric default. Used for settings that must only be sent to the provider
+# when the operator explicitly opts in (e.g. embedding dimensions, which only a
+# subset of embedding models accept).
+def _int_or_none_setting(key: str) -> int | None:
+    raw = _strip_or_none(key)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 # load the environment variables
 def load_environment_variables(envfile: str) -> dict[str, Any]:
     e_file = Path(envfile)
@@ -63,7 +77,12 @@ def _get_settings_from_environment():
         "api_key": _str_setting("API_KEY", "your-api-key-here"),
         "folder_path": _str_setting("FOLDER_PATH", "./pdfs"),
         "embedding_model": _str_setting("EMBEDDING_MODEL", "text-embedding-ada-002"),
-        "embedding_dimensions": _int_setting("EMBEDDING_DIMENSIONS", 1536),
+        # None (the default) means "use the model's native dimension" -- only
+        # set this for embedding models that support a custom `dimensions`
+        # request param (e.g. text-embedding-3-*); sending it to models that
+        # don't support it (e.g. the default text-embedding-ada-002) is a
+        # request error.
+        "embedding_dimensions": _int_or_none_setting("EMBEDDING_DIMENSIONS"),
         "embedding_base_url": _str_setting(
             "EMBEDDING_BASE_URL", "https://api.openai.com/v1"
         ),
