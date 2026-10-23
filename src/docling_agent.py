@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """LangGraph compile-time wiring and public entrypoints for the document processing workflow."""
 
+import re
 import sys
 from typing import Any
 from argparse import ArgumentParser
@@ -16,12 +17,24 @@ try:
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
 
+# Explicit names kept for clarity/documentation; matched as a fallback alongside
+# the pattern below so a key doesn't need to be enumerated here to be redacted.
 _SENSITIVE_MLFLOW_PARAMS = {
     "api_key",
     "embedding_api_key",
     "vlm_api_headers",
     "vlm_api_params",
+    "milvus_token",
 }
+
+# Any config key that looks like a credential is redacted from MLflow params,
+# regardless of whether it's been explicitly enumerated above. This is a
+# denylist-by-pattern so newly added secret-shaped settings are safe by default.
+_SENSITIVE_KEY_PATTERN = re.compile(r"(api_key|token|secret|password|headers)$", re.IGNORECASE)
+
+
+def _is_sensitive_param(key: str) -> bool:
+    return key in _SENSITIVE_MLFLOW_PARAMS or bool(_SENSITIVE_KEY_PATTERN.search(key))
 
 
 def _apply_nlp_overrides(agent_settings: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -111,7 +124,7 @@ def _run_workflow_with_mlflow(agent_settings: dict[str, Any]) -> dict[str, Any]:
         mlflow.set_tag("mlflow.trace.session", session_id)
 
         sanitised = {
-            k: v for k, v in agent_settings.items() if k not in _SENSITIVE_MLFLOW_PARAMS
+            k: v for k, v in agent_settings.items() if not _is_sensitive_param(k)
         }
         mlflow.log_params(sanitised)
         mlflow.set_tag(
