@@ -11,7 +11,7 @@ Config is a plain dict throughout — no `PDFProcessorState` TypedDict or compil
 
 ## Workflow
 
-1. **Extract config** (`src/graph/prompt_extraction.py`): If `user_prompt` is set, an LLM extracts overrides via `extract_config_from_prompt`; non-`None` values are applied via `merge_overrides`. Unextractable keys keep `.env` defaults. `vlm_api_params` and vector DB secrets are env-only and never extracted.
+1. **Extract config** (`src/graph/prompt_extraction.py`): If `user_prompt` is set, an LLM extracts overrides via `extract_config_from_prompt`; non-`None` values are applied via `merge_overrides`. Unextractable keys keep `.env` defaults. Keys in `src/graph/prompts/extractor.py`'s `_SENSITIVE_KEYS` (`folder_path`, `base_url`, `api_key`, `embedding_base_url`, `embedding_api_key`, `vlm_api_url`, `vlm_api_headers`) — plus `vlm_api_params` and vector DB secrets — are never extracted from free-text `user_prompt`: they're excluded from the extraction system prompt, and `extract_config_from_prompt`/`merge_overrides` force them to stay unset even if a model response or caller-supplied overrides dict includes them. This boundary exists because `user_prompt` is treated as untrusted input — allowing it to set network endpoints, credentials, or filesystem paths would let a crafted prompt redirect embedding/VLM traffic or read arbitrary directories.
 2. **Load documents** (`src/graph/document_paths.py`): `list_document_paths(folder_path)` globs for `*.pdf`, `*.docx`, `*.xlsx`, `*.md`, `*.html`, `*.latex`, `*.tex`.
 3. **Batched pipeline** (`src/graph/document_pipeline.py`): `for start in range(0, len(input_data), max_conc)` — each batch processes up to `max_conc` documents through these stages in parallel:
 
