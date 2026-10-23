@@ -233,14 +233,26 @@ def chunk_doc(
         strategy = config.get("chunking_strategy")
         doc = result["doc"]
 
-        if strategy == "hybrid":
-            chunks = chunk_document_records_hybrid([doc])
-        else:
-            chunks = chunk_document_records(
-                [doc],
-                config.get("chunk_size", 1000),
-                config.get("chunk_overlap", 100),
-            )
+        try:
+            if strategy == "hybrid":
+                chunks = chunk_document_records_hybrid([doc])
+            else:
+                chunks = chunk_document_records(
+                    [doc],
+                    config.get("chunk_size", 1000),
+                    config.get("chunk_overlap", 100),
+                )
+        except Exception as e:
+            if enable_tracing:
+                with _ml.start_span("chunk_doc"):
+                    _ml.set_tag("error", str(e))
+            print(f"Error chunking {result['path']}: {e}")
+            return {
+                "chunks": [],
+                "path": result["path"],
+                "error": str(e),
+                "config": config,
+            }
 
         if enable_tracing:
             with _ml.start_span("chunk_doc"):
@@ -294,6 +306,7 @@ def embed_doc(
                 config.get("embedding_model"),
                 config.get("embedding_base_url"),
                 config.get("embedding_api_key", ""),
+                config.get("embedding_dimensions"),
             )
             if enable_tracing:
                 with _ml.start_span("embed_doc"):

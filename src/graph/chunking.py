@@ -32,7 +32,23 @@ def chunk_document_records(
 
     Each output record preserves and extends ``metadata`` with ``chunk_index`` and
     ``chunk_count``.
+
+    Raises
+    ------
+    ValueError
+        If ``chunk_size`` is not positive or ``chunk_overlap`` is not smaller than
+        ``chunk_size``. Without this check, ``start`` never advances past the end
+        of ``content`` and the loop below never terminates.
     """
+    if chunk_size <= 0:
+        raise ValueError(f"chunk_size must be > 0, got {chunk_size}")
+    if chunk_overlap < 0:
+        raise ValueError(f"chunk_overlap must be >= 0, got {chunk_overlap}")
+    if chunk_overlap >= chunk_size:
+        raise ValueError(
+            f"chunk_overlap ({chunk_overlap}) must be smaller than chunk_size ({chunk_size})"
+        )
+
     chunked_docs: list[dict[str, Any]] = []
 
     for doc in documents:
