@@ -28,9 +28,13 @@ def test_dimensions_omitted_when_not_set(monkeypatch):
     client = _fake_client(captured)
     monkeypatch.setattr(embeddings_mod, "get_embedding_client", lambda *_: client)
 
-    embeddings_mod.embed_texts(["hello"], "text-embedding-ada-002", "http://x", "key")
+    vectors, errors = embeddings_mod.embed_texts(
+        ["hello"], "text-embedding-ada-002", "http://x", "key"
+    )
 
     assert "dimensions" not in captured[0]
+    assert errors == []
+    assert vectors == [[0.1, 0.2, 0.3]]
 
 
 def test_dimensions_passed_when_set(monkeypatch):
@@ -38,11 +42,77 @@ def test_dimensions_passed_when_set(monkeypatch):
     client = _fake_client(captured)
     monkeypatch.setattr(embeddings_mod, "get_embedding_client", lambda *_: client)
 
-    embeddings_mod.embed_texts(
+    vectors, errors = embeddings_mod.embed_texts(
         ["hello"], "text-embedding-3-small", "http://x", "key", dimensions=256
     )
 
     assert captured[0]["dimensions"] == 256
+    assert errors == []
+
+
+class TestEmbeddingRetry:
+    """Transient failures should be retried before a batch is given up on."""
+
+    def test_transient_error_is_retried_then_succeeds(self, monkeypatch):
+        monkeypatch.setattr(embeddings_mod, "wait_exponential", lambda **kw: lambda *a: 0)
+        call_count = {"n": 0}
+
+        def _create(**kwargs):
+            call_count["n"] += 1
+            if call_count["n"] < 3:
+                raise embeddings_mod.RateLimitError(
+                    "rate limited", response=MagicMock(), body=None
+                )
+            item = MagicMock()
+            item.index = 0
+            item.embedding = [0.9]
+            response = MagicMock()
+            response.data = [item]
+            return response
+
+        client = MagicMock()
+        client.embeddings.create.side_effect = _create
+        monkeypatch.setattr(embeddings_mod, "get_embedding_client", lambda *_: client)
+
+        vectors, errors = embeddings_mod.embed_texts(["hello"], "model", "http://x", "key")
+
+        assert call_count["n"] == 3
+        assert vectors == [[0.9]]
+        assert errors == []
+
+    def test_retries_exhausted_reports_error_without_raising(self, monkeypatch):
+        def _create(**kwargs):
+            raise embeddings_mod.RateLimitError("still limited", response=MagicMock(), body=None)
+
+        client = MagicMock()
+        client.embeddings.create.side_effect = _create
+        monkeypatch.setattr(embeddings_mod, "get_embedding_client", lambda *_: client)
+
+        vectors, errors = embeddings_mod.embed_texts(
+            ["a", "b"], "model", "http://x", "key"
+        )
+
+        assert vectors == [None, None]
+        assert len(errors) == 1
+        assert "still limited" in errors[0]
+        assert client.embeddings.create.call_count == embeddings_mod._EMBEDDING_RETRY_ATTEMPTS
+
+    def test_non_retryable_error_fails_immediately(self, monkeypatch):
+        call_count = {"n": 0}
+
+        def _create(**kwargs):
+            call_count["n"] += 1
+            raise ValueError("bad request")
+
+        client = MagicMock()
+        client.embeddings.create.side_effect = _create
+        monkeypatch.setattr(embeddings_mod, "get_embedding_client", lambda *_: client)
+
+        vectors, errors = embeddings_mod.embed_texts(["a"], "model", "http://x", "key")
+
+        assert call_count["n"] == 1
+        assert vectors == [None]
+        assert len(errors) == 1
 
 
 class TestEmbeddingClientCacheConcurrency:

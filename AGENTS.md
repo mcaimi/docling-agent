@@ -19,10 +19,10 @@ Config is a plain dict throughout — no `PDFProcessorState` TypedDict or compil
    |-------|----------|-------|
    | Convert | `convert_doc` | Fresh `DocumentConverter` per task via `_new_converter`. Standard handles all formats; VLM (`_effective_pipeline fallback to standard) applies to PDF only. Output record: `content` (markdown), `docling_document`, `metadata`. Errors → `doc: None` + `error` string. |
    | Chunk | `chunk_doc` | `fixed` → chunks markdown `content` by `chunk_size`/`chunk_overlap`. `hybrid` → uses `docling_document` + `HybridChunker.contextualize`. Metadata extended with `chunk_index`, `chunk_count`. |
-   | Embed | `embed_doc` | One embedding per chunk via `embed_texts`. API errors → `None` at that index. |
+   | Embed | `embed_doc` | One embedding per chunk via `embed_texts`. Transient API errors (rate limits, timeouts, connection issues, 5xx) are retried with backoff; a batch that still fails afterward → `None` at those indices plus a non-blocking `embedding_error` note on the document record. |
    | Store | `store_doc` | Writes precomputed vectors to `chroma`/`milvus` via cached connections. Supports write modes: `insert` (default), `upsert` (delete+insert), `skip_existing`. Features: parallel batch processing, retry with exponential backoff, circuit breaker for failures, connection pooling. Skips `None` embeddings. IDs: `{file_path}#chunk_{chunk_index}`. No-op when backend is `none`. |
 
-4. **Aggregate** (`src/docling_agent.py`): Flatten chunks → `documents`, vectors → `embeddings`, sum `vectors_stored`, collect failures into `error_reports` (`{"path", "error", "stage"}` where `stage` is `pipeline` or `vector_store`). Result dict also includes all resolved `agent_settings` keys except `documents`/`embeddings`.
+4. **Aggregate** (`src/docling_agent.py`): Flatten chunks → `documents`, vectors → `embeddings`, sum `vectors_stored`/`vectors_upserted`/`retry_count`, collect `failed_chunks`, and collect failures into `error_reports` (`{"path", "error", "stage"}` where `stage` is `pipeline`, `embedding`, or `vector_store`). `embedding` is non-blocking -- it means some (not necessarily all) of a document's chunks failed to embed after retries; `chunks`/`embeddings` still include whatever succeeded, unlike `pipeline`/`vector_store` errors which mean nothing was stored for that document. Result dict also includes all resolved `agent_settings` keys except `documents`/`embeddings`.
 
 ## Return Shape
 
@@ -34,7 +34,7 @@ Config is a plain dict throughout — no `PDFProcessorState` TypedDict or compil
 | `vectors_upserted` | `int` | Count of vectors replaced (upsert mode) |
 | `retry_count` | `int` | Total retry attempts across all batches |
 | `failed_chunks` | `list[dict]` | `{"id", "error"}` for chunks that failed to store |
-| `error_reports` | `list[dict]` | `{"path", "error", "stage"}` per file-level failure |
+| `error_reports` | `list[dict]` | `{"path", "error", "stage"}` per file-level failure; `stage` is `pipeline`, `embedding`, or `vector_store` |
 | remaining keys | — | From resolved `agent_settings` |
 
 ## Key Conventions

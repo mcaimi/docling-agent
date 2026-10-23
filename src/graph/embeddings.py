@@ -3,10 +3,21 @@
 
 # import the openai client
 try:
-    from openai import OpenAI
+    from openai import (
+        OpenAI,
+        APIConnectionError,
+        APITimeoutError,
+        InternalServerError,
+        RateLimitError,
+    )
     import httpx
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
+
+try:
+    from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+except ImportError as e:
+    raise ImportError(f"tenacity is required: {e}") from e
 
 import os
 import threading
@@ -25,6 +36,20 @@ if enable_tracing:
 # OpenAI embeddings API batch size limit
 # Reference: https://platform.openai.com/docs/api-reference/embeddings
 _EMBEDDING_BATCH_SIZE = 2048
+
+# Transient errors worth retrying (rate limits, timeouts, connection issues,
+# upstream 5xx). Anything else (bad request, auth failure, etc.) fails
+# immediately -- retrying those would just waste time and hide the real error.
+_RETRYABLE_EMBEDDING_ERRORS = (
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    RateLimitError,
+)
+# Mirrors the defaults used for vector store writes (see vector_store.py's
+# _insert_batch_with_retry) for consistency across the pipeline's resilience behavior.
+_EMBEDDING_RETRY_ATTEMPTS = 3
+_EMBEDDING_RETRY_BACKOFF_MULTIPLIER = 1
 
 # Embedding clients cache, keyed by (base_url, api_key) so that concurrent
 # document-pipeline tasks running with different endpoints/credentials (e.g.
@@ -74,24 +99,39 @@ def get_embedding_client(base_url: str, api_key: str) -> OpenAI:
 
 def _embed_batch(
     client: OpenAI, texts: list[str], model: str, dimensions: int | None = None
-) -> list[list[float] | None]:
+) -> tuple[list[list[float] | None], str | None]:
     """
     Embed a single batch of texts (up to _EMBEDDING_BATCH_SIZE items).
 
-    Returns embeddings in the same order as input texts. On API error, all
-    positions in this batch are set to None.
+    Transient errors (rate limits, timeouts, connection issues, upstream 5xx)
+    are retried with exponential backoff before giving up. Returns embeddings
+    in the same order as input texts; if the batch ultimately fails, all
+    positions are ``None`` and the second tuple element holds the error
+    message (``None`` on success) so callers can surface it instead of
+    silently dropping the chunks.
     """
     kwargs: dict[str, Any] = {"input": texts, "model": model}
     if dimensions is not None:
         kwargs["dimensions"] = dimensions
+
+    @retry(
+        stop=stop_after_attempt(_EMBEDDING_RETRY_ATTEMPTS),
+        wait=wait_exponential(multiplier=_EMBEDDING_RETRY_BACKOFF_MULTIPLIER, min=1, max=10),
+        retry=retry_if_exception_type(_RETRYABLE_EMBEDDING_ERRORS),
+        reraise=True,
+    )
+    def _do_create():
+        return client.embeddings.create(**kwargs)
+
     try:
-        response = client.embeddings.create(**kwargs)
+        response = _do_create()
         # Sort by index to ensure correct order (API may return out of order)
         sorted_embeddings = sorted(response.data, key=lambda x: x.index)
-        return [item.embedding for item in sorted_embeddings]
+        return [item.embedding for item in sorted_embeddings], None
     except Exception as e:
-        print(f"Error generating embeddings for batch of {len(texts)} texts: {str(e)}")
-        return [None] * len(texts)
+        error = f"Error generating embeddings for batch of {len(texts)} texts: {e}"
+        print(error)
+        return [None] * len(texts), error
 
 
 # embed the texts
@@ -103,33 +143,41 @@ def embed_texts(
     base_url: str,
     api_key: str,
     dimensions: int | None = None,
-) -> list[list[float] | None]:
+) -> tuple[list[list[float] | None], list[str]]:
     """
     Request embeddings for all texts using batched API calls.
 
     Splits input into batches of up to 2048 items (OpenAI API limit) and makes
-    parallel-capable requests. On API errors for a batch, those positions are
-    ``None`` and the error is printed.
+    parallel-capable requests. Transient errors (rate limits, timeouts,
+    connection issues, upstream 5xx) are retried with backoff before a batch
+    is considered failed. For a batch that still fails after retries, those
+    positions are ``None`` and the error is recorded in the returned error
+    list, so callers can surface it instead of it only being printed.
 
     ``dimensions``, when set, is passed through to the provider's embeddings
     request. Only a subset of embedding models (e.g. OpenAI's
     ``text-embedding-3-*`` family) accept this parameter -- leave it unset
     (the default) for models that don't.
 
-    Returns embeddings in the same order as input texts.
+    Returns a ``(embeddings, errors)`` tuple. ``embeddings`` is in the same
+    order as input texts; ``errors`` holds one message per failed batch (empty
+    if every batch succeeded).
     """
     if not texts:
-        return []
+        return [], []
 
     client = get_embedding_client(base_url, api_key)
     all_embeddings: list[list[float] | None] = []
+    errors: list[str] = []
     embedding_dimensions: int | None = None
 
     # Process in batches
     for i in range(0, len(texts), _EMBEDDING_BATCH_SIZE):
         batch = texts[i : i + _EMBEDDING_BATCH_SIZE]
-        batch_embeddings = _embed_batch(client, batch, model, dimensions)
+        batch_embeddings, batch_error = _embed_batch(client, batch, model, dimensions)
         all_embeddings.extend(batch_embeddings)
+        if batch_error is not None:
+            errors.append(batch_error)
 
         # Capture dimensions from first successful embedding
         if embedding_dimensions is None:
@@ -149,7 +197,7 @@ def embed_texts(
             _ml.set_tag("success_count", sum(1 for e in all_embeddings if e is not None))
             _ml.set_tag("failure_count", sum(1 for e in all_embeddings if e is None))
 
-    return all_embeddings
+    return all_embeddings, errors
 
 
 def embed_single_text(
@@ -180,5 +228,5 @@ def embed_single_text(
     list[float] | None
         Embedding vector, or None if the API call fails
     """
-    result = embed_texts([text], model, base_url, api_key, dimensions)
-    return result[0] if result else None
+    vectors, _errors = embed_texts([text], model, base_url, api_key, dimensions)
+    return vectors[0] if vectors else None

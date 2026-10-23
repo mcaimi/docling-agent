@@ -71,6 +71,14 @@ def _aggregate_pipeline_results(
             errors.append(
                 {"path": item["path"], "error": item["error"], "stage": "pipeline"}
             )
+        if item.get("embedding_error"):
+            errors.append(
+                {
+                    "path": item["path"],
+                    "error": item["embedding_error"],
+                    "stage": "embedding",
+                }
+            )
         if item.get("store_error"):
             errors.append(
                 {

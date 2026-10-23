@@ -278,7 +278,13 @@ def embed_doc(
     Returns
     -------
     dict
-        {"chunks": [...], "embeddings": [...], "path": str, "error": str|None, "config": dict}
+        {"chunks": [...], "embeddings": [...], "path": str, "error": str|None,
+        "embedding_error": str|None, "config": dict}
+
+        ``error`` means the whole document has nothing to store (upstream
+        failure or no chunks); ``embedding_error`` is a non-blocking note that
+        some (but not necessarily all) chunks failed to embed after retries --
+        ``chunks``/``embeddings`` still carry whatever succeeded.
     """
     chunked_task = item["chunked"]
     result = chunked_task.result()
@@ -291,6 +297,7 @@ def embed_doc(
                 "embeddings": [],
                 "path": result["path"],
                 "error": result["error"],
+                "embedding_error": None,
                 "config": config,
             }
 
@@ -301,12 +308,19 @@ def embed_doc(
         print(f" -> Embedding {len(texts)} chunks...")
 
         try:
-            vectors = embed_texts(
+            vectors, embed_errors = embed_texts(
                 texts,
                 config.get("embedding_model"),
                 config.get("embedding_base_url"),
                 config.get("embedding_api_key", ""),
                 config.get("embedding_dimensions"),
+            )
+            failed_count = sum(1 for v in vectors if v is None)
+            embedding_error = (
+                f"{failed_count}/{len(vectors)} chunks failed to embed: "
+                + "; ".join(embed_errors)
+                if failed_count
+                else None
             )
             if enable_tracing:
                 with _ml.start_span("embed_doc"):
@@ -318,6 +332,8 @@ def embed_doc(
                     _ml.set_tag(
                         "non_null_count", sum(1 for v in vectors if v is not None)
                     )
+                    if embedding_error:
+                        _ml.set_tag("embedding_error", embedding_error)
         except Exception as e:
             if enable_tracing:
                 with _ml.start_span("embed_doc"):
@@ -325,11 +341,14 @@ def embed_doc(
             raise
 
         print(f" -> Produced {len(vectors)} embeddings.")
+        if embedding_error:
+            print(f" -> {embedding_error}")
         return {
             "chunks": chunks,
             "embeddings": vectors,
             "path": result["path"],
             "error": None,
+            "embedding_error": embedding_error,
             "config": config,
         }
 
@@ -360,6 +379,7 @@ def store_doc(item: dict) -> dict:
         "embeddings": result.get("embeddings", []),
         "path": result["path"],
         "error": result.get("error"),
+        "embedding_error": result.get("embedding_error"),
         "config": config,
         "stored_count": 0,
         "store_error": None,

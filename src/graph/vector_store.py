@@ -98,7 +98,9 @@ class QueryEmbeddings(Embeddings):
         except ImportError as e:
             raise ImportError(f"embeddings module required: {e}") from e
 
-        vectors = embed_texts(texts, self.model, self.base_url, self.api_key, self.dimensions)
+        vectors, errors = embed_texts(texts, self.model, self.base_url, self.api_key, self.dimensions)
+        for error in errors:
+            print(f"Query embedding failed: {error}")
         # Filter out None values and return only valid embeddings
         return [v for v in vectors if v is not None]
 
