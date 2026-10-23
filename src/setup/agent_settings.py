@@ -94,6 +94,30 @@ def _get_settings_from_environment():
         "milvus_token": _strip_or_none("MILVUS_TOKEN"),
         "milvus_db_name": _str_setting("MILVUS_DB_NAME", "default"),
         "vector_store_batch_size": _int_setting("VECTOR_STORE_BATCH_SIZE", 200),
+        "vector_store_write_mode": _str_setting("VECTOR_STORE_WRITE_MODE", "insert"),
+        "vector_store_max_batch_workers": _int_setting("VECTOR_STORE_MAX_BATCH_WORKERS", 4),
+        "vector_store_retry_attempts": _int_setting("VECTOR_STORE_RETRY_ATTEMPTS", 3),
+        "vector_store_retry_backoff_multiplier": _int_setting(
+            "VECTOR_STORE_RETRY_BACKOFF_MULTIPLIER", 1
+        ),
+        "vector_store_circuit_breaker_threshold": _int_setting(
+            "VECTOR_STORE_CIRCUIT_BREAKER_THRESHOLD", 5
+        ),
+        "vector_store_circuit_breaker_timeout": _int_setting(
+            "VECTOR_STORE_CIRCUIT_BREAKER_TIMEOUT", 60
+        ),
+        "milvus_index_type": _str_setting("MILVUS_INDEX_TYPE", "HNSW"),
+        "milvus_metric_type": _str_setting("MILVUS_METRIC_TYPE", "COSINE"),
+        "milvus_index_params": _parse_json_object_str(
+            _str_setting("MILVUS_INDEX_PARAMS", "{}")
+        ),
+        "milvus_consistency_level": _str_setting("MILVUS_CONSISTENCY_LEVEL", "Bounded"),
+        "milvus_partition_name": _strip_or_none("MILVUS_PARTITION_NAME"),
+        "chroma_distance_function": _str_setting("CHROMA_DISTANCE_FUNCTION", "cosine"),
+        "chroma_collection_metadata": _parse_json_object_str(
+            _str_setting("CHROMA_COLLECTION_METADATA", "{}")
+        ),
+        "chroma_allow_reset": _int_setting("CHROMA_ALLOW_RESET", 0),
     }
     return settings
 

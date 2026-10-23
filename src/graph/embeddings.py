@@ -127,3 +127,27 @@ def embed_texts(
             _ml.set_tag("failure_count", sum(1 for e in all_embeddings if e is None))
 
     return all_embeddings
+
+
+def embed_single_text(text: str, model: str, base_url: str, api_key: str) -> list[float] | None:
+    """
+    Embed a single text string.
+
+    Parameters
+    ----------
+    text : str
+        Text to embed
+    model : str
+        Embedding model name
+    base_url : str
+        OpenAI-compatible API base URL
+    api_key : str
+        API key for authentication
+
+    Returns
+    -------
+    list[float] | None
+        Embedding vector, or None if the API call fails
+    """
+    result = embed_texts([text], model, base_url, api_key)
+    return result[0] if result else None

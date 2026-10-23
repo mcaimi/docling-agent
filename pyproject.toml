@@ -11,6 +11,7 @@ dependencies = [
     "mlflow>=3.12.0",
     "openai>=2.30.0",
     "python-dotenv>=1.2.2",
+    "tenacity>=9.0.0",
 ]
 
 [project.optional-dependencies]
@@ -19,4 +20,9 @@ milvus = ["langchain-milvus>=0.3.3"]
 vector-stores = [
     "langchain-chroma>=1.1.0",
     "langchain-milvus>=0.3.3",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "requests>=2.31.0",
 ]
