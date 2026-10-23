@@ -9,6 +9,7 @@ except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
 
 import os
+import threading
 from typing import Any
 
 # check if tracing is enabled
@@ -25,20 +26,33 @@ if enable_tracing:
 # Reference: https://platform.openai.com/docs/api-reference/embeddings
 _EMBEDDING_BATCH_SIZE = 2048
 
-# define the embedding client cache
-_embedding_client: OpenAI | None = None
-_embedding_client_config: tuple[str, str] | None = None
+# Embedding clients cache, keyed by (base_url, api_key) so that concurrent
+# document-pipeline tasks running with different endpoints/credentials (e.g.
+# separate requests in a long-lived service) each get their own client instead
+# of racing to overwrite a single shared slot. Guarded by a lock: the previous
+# single-slot cache had a check-then-set race where two threads with different
+# configs could interleave and hand one thread the other's client/credentials.
+_embedding_clients: dict[tuple[str, str], OpenAI] = {}
+_embedding_clients_lock = threading.Lock()
 
 
 # get the embedding client
 # uses the connection params to configure the client
 # connection settings are stored in the graph state
 def get_embedding_client(base_url: str, api_key: str) -> OpenAI:
-    """Return a cached OpenAI client with connection pooling, recreating it if credentials change."""
-    global _embedding_client, _embedding_client_config
-    current_config = (base_url, api_key)
+    """Return a cached OpenAI client with connection pooling, keyed by (base_url, api_key)."""
+    cache_key = (base_url, api_key)
 
-    if _embedding_client is None or _embedding_client_config != current_config:
+    client = _embedding_clients.get(cache_key)
+    if client is not None:
+        return client
+
+    with _embedding_clients_lock:
+        # re-check: another thread may have created it while we waited for the lock
+        client = _embedding_clients.get(cache_key)
+        if client is not None:
+            return client
+
         # Configure httpx client with connection pooling
         http_client = httpx.Client(
             limits=httpx.Limits(
@@ -49,14 +63,13 @@ def get_embedding_client(base_url: str, api_key: str) -> OpenAI:
             timeout=httpx.Timeout(60.0, connect=10.0),
         )
 
-        _embedding_client = OpenAI(
+        client = OpenAI(
             api_key=api_key,
             base_url=base_url,
             http_client=http_client,
         )
-        _embedding_client_config = current_config
-
-    return _embedding_client
+        _embedding_clients[cache_key] = client
+        return client
 
 
 def _embed_batch(

@@ -2,6 +2,7 @@
 """LangChain vector store connectors for persisting precomputed chunk embeddings."""
 
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Literal
 
@@ -41,12 +42,19 @@ VectorStoreBackend = Literal["none", "chroma", "milvus"]
 # supported write modes
 WriteMode = Literal["insert", "upsert", "skip_existing"]
 
-# global vector store cache for connection reuse
+# global vector store cache for connection reuse. Guarded by a lock: pipeline
+# tasks run concurrently (one per document in a batch), and without it two
+# threads could race through the check-then-create-then-store sequence below
+# and each build their own backend connection for the same cache key, silently
+# discarding one (a real resource leak for backends like Chroma that hold a
+# persistent-directory file lock, or Milvus's connection pool).
 _vector_store_cache: dict[tuple, VectorStore] = {}
 _vector_store_cache_config: dict[tuple, dict[str, Any]] = {}
+_vector_store_cache_lock = threading.Lock()
 
-# global circuit breakers per backend
+# global circuit breakers per backend, same race as above without a lock.
 _circuit_breakers: dict[str, CircuitBreaker] = {}
+_circuit_breakers_lock = threading.Lock()
 
 
 class _NoOpEmbeddings(Embeddings):
@@ -133,15 +141,24 @@ def _build_cache_key(config: dict[str, Any]) -> tuple:
 # get or create circuit breaker for a backend
 def _get_circuit_breaker(backend: str, config: dict[str, Any]) -> CircuitBreaker:
     """Get or create a circuit breaker for the specified backend."""
-    if backend not in _circuit_breakers:
+    circuit_breaker = _circuit_breakers.get(backend)
+    if circuit_breaker is not None:
+        return circuit_breaker
+
+    with _circuit_breakers_lock:
+        circuit_breaker = _circuit_breakers.get(backend)
+        if circuit_breaker is not None:
+            return circuit_breaker
+
         threshold = config.get("vector_store_circuit_breaker_threshold", 5)
         timeout = config.get("vector_store_circuit_breaker_timeout", 60)
-        _circuit_breakers[backend] = CircuitBreaker(
+        circuit_breaker = CircuitBreaker(
             failure_threshold=threshold,
             timeout=float(timeout),
             name=f"vector_store_{backend}",
         )
-    return _circuit_breakers[backend]
+        _circuit_breakers[backend] = circuit_breaker
+        return circuit_breaker
 
 
 # get the vector store backend from the configuration
@@ -269,18 +286,24 @@ def get_or_create_vector_store(config: dict[str, Any]) -> VectorStore | None:
     cache_key = _build_cache_key(config)
 
     # Check if we have a cached instance with matching config
-    if cache_key in _vector_store_cache:
-        cached_config = _vector_store_cache_config.get(cache_key, {})
-        # Verify config hasn't changed (for mutable settings like index params)
-        if cached_config == config:
-            return _vector_store_cache[cache_key]
+    if _vector_store_cache_config.get(cache_key) == config:
+        cached = _vector_store_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
-    # Create new instance and cache it
-    vector_store = _create_vector_store(config)
-    _vector_store_cache[cache_key] = vector_store
-    _vector_store_cache_config[cache_key] = config.copy()
+    with _vector_store_cache_lock:
+        # re-check inside the lock: another thread may have just built this
+        if _vector_store_cache_config.get(cache_key) == config:
+            cached = _vector_store_cache.get(cache_key)
+            if cached is not None:
+                return cached
 
-    return vector_store
+        # Create new instance and cache it
+        vector_store = _create_vector_store(config)
+        _vector_store_cache[cache_key] = vector_store
+        _vector_store_cache_config[cache_key] = config.copy()
+
+        return vector_store
 
 
 # backward compatibility alias

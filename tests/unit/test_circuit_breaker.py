@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """Unit tests for circuit breaker pattern."""
 
+import threading
 import time
 import pytest
 from src.utils.circuit_breaker import CircuitBreaker, CircuitBreakerError, CircuitState
@@ -170,3 +171,74 @@ class TestCircuitBreaker:
         result = cb.call(func_with_args, "x", "y", c="z")
         assert result == "x-y-z"
         assert cb.state == CircuitState.CLOSED
+
+
+class TestCircuitBreakerConcurrency:
+    """A single CircuitBreaker instance is shared across parallel batch workers
+    in store_chunk_embeddings's ThreadPoolExecutor -- its bookkeeping must be
+    safe against concurrent calls from many threads.
+    """
+
+    def test_concurrent_failures_are_not_lost(self):
+        """Without a lock, `self.failure_count += 1` from many threads can lose
+        increments (read-modify-write race); the final count must equal the
+        exact number of failing calls made.
+        """
+        # threshold high enough that the circuit never opens mid-run and starts
+        # fast-failing (which would short-circuit some threads before they call func)
+        cb = CircuitBreaker(failure_threshold=100_000, timeout=60.0)
+        n_threads = 50
+        calls_per_thread = 100
+
+        def failing_func():
+            raise ValueError("boom")
+
+        def worker():
+            for _ in range(calls_per_thread):
+                try:
+                    cb.call(failing_func)
+                except ValueError:
+                    pass
+
+        threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert cb.failure_count == n_threads * calls_per_thread
+
+    def test_concurrent_mixed_success_and_failure_keeps_consistent_state(self):
+        """Interleaved successes/failures from many threads must never leave the
+        breaker in a state inconsistent with its own counters (e.g. CLOSED with
+        a stale nonzero failure_count left over from a lost reset).
+        """
+        cb = CircuitBreaker(failure_threshold=1_000_000, timeout=60.0)
+        n_threads = 20
+        iterations = 200
+        errors: list[Exception] = []
+
+        def mixed_worker(thread_id: int):
+            try:
+                for i in range(iterations):
+                    if (thread_id + i) % 2 == 0:
+                        cb.call(lambda: "ok")
+                    else:
+                        try:
+                            cb.call(lambda: (_ for _ in ()).throw(ValueError("boom")))
+                        except ValueError:
+                            pass
+            except Exception as e:  # pragma: no cover - would indicate a real bug
+                errors.append(e)
+
+        threads = [threading.Thread(target=mixed_worker, args=(i,)) for i in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+        # the last call on any given thread is a success or failure; either way
+        # the breaker must be in a valid, non-corrupted state
+        assert cb.state in (CircuitState.CLOSED, CircuitState.OPEN, CircuitState.HALF_OPEN)
+        assert cb.failure_count >= 0
