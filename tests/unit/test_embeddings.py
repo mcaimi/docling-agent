@@ -140,7 +140,7 @@ class TestEmbeddingClientCacheConcurrency:
             return FakeClient(key)
 
         monkeypatch.setattr(embeddings_mod, "OpenAI", fake_openai)
-        monkeypatch.setattr(embeddings_mod.httpx, "Client", lambda **kw: object())
+        monkeypatch.setattr(embeddings_mod.httpx2, "Client", lambda **kw: object())
 
         n_configs = 10
         calls_per_config = 50

@@ -10,7 +10,11 @@ try:
         InternalServerError,
         RateLimitError,
     )
-    import httpx
+    # openai>=3 moved its HTTP transport to httpx2 (OpenAI.__init__'s
+    # http_client parameter is typed httpx2.Client, not the classic httpx's).
+    # A classic httpx.Client happens to still be accepted today via an
+    # undocumented compatibility path, but that's not the supported API.
+    import httpx2
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
 
@@ -78,14 +82,14 @@ def get_embedding_client(base_url: str, api_key: str) -> OpenAI:
         if client is not None:
             return client
 
-        # Configure httpx client with connection pooling
-        http_client = httpx.Client(
-            limits=httpx.Limits(
+        # Configure httpx2 client with connection pooling
+        http_client = httpx2.Client(
+            limits=httpx2.Limits(
                 max_connections=100,
                 max_keepalive_connections=20,
                 keepalive_expiry=30.0,
             ),
-            timeout=httpx.Timeout(60.0, connect=10.0),
+            timeout=httpx2.Timeout(60.0, connect=10.0),
         )
 
         client = OpenAI(
