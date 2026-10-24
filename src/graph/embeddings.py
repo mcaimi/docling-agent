@@ -23,21 +23,10 @@ try:
 except ImportError as e:
     raise ImportError(f"tenacity is required: {e}") from e
 
-import os
 import threading
 from typing import Any
 
-from ..utils.mlflow_tracing import run_context
-
-# check if tracing is enabled
-enable_tracing = int(os.getenv("ENABLE_TRACING", "0")) == 1
-
-if enable_tracing:
-    try:
-        import mlflow as _ml
-    except ImportError:
-        print("MLflow is not installed. Tracing is disabled.")
-        enable_tracing = False
+from ..utils.mlflow_tracing import start_child_span, end_span
 
 # OpenAI embeddings API batch size limit
 # Reference: https://platform.openai.com/docs/api-reference/embeddings
@@ -150,6 +139,7 @@ def embed_texts(
     api_key: str,
     dimensions: int | None = None,
     run_id: str | None = None,
+    parent_span: Any = None,
 ) -> tuple[list[list[float] | None], list[str]]:
     """
     Request embeddings for all texts using batched API calls.
@@ -166,8 +156,8 @@ def embed_texts(
     ``text-embedding-3-*`` family) accept this parameter -- leave it unset
     (the default) for models that don't.
 
-    ``run_id``, when set, re-enters that run as active before creating this
-    call's MLflow span (see ``utils.mlflow_tracing.run_context``). Needed
+    ``run_id``/``parent_span``, when set, create this call's MLflow span as a
+    child of ``parent_span`` on that run (see ``utils.mlflow_tracing``). Needed
     because this is typically called from a LangGraph task worker thread, whose
     context doesn't inherit the active run from the thread that started it --
     without it, MLflow would spawn a new orphan run to hold the span instead.
@@ -199,16 +189,18 @@ def embed_texts(
                     embedding_dimensions = len(emb)
                     break
 
-    if enable_tracing:
-        with run_context(run_id), _ml.start_span("embed_texts"):
-            _ml.set_tag("model", model)
-            _ml.set_tag("text_count", len(texts))
-            _ml.set_tag("batch_count", (len(texts) + _EMBEDDING_BATCH_SIZE - 1) // _EMBEDDING_BATCH_SIZE)
-            _ml.set_tag("batch_size", _EMBEDDING_BATCH_SIZE)
-            if embedding_dimensions is not None:
-                _ml.set_tag("embedding_dimensions", embedding_dimensions)
-            _ml.set_tag("success_count", sum(1 for e in all_embeddings if e is not None))
-            _ml.set_tag("failure_count", sum(1 for e in all_embeddings if e is None))
+    span = start_child_span(run_id, parent_span, "embed_texts")
+    span_attrs = {
+        "model": model,
+        "text_count": len(texts),
+        "batch_count": (len(texts) + _EMBEDDING_BATCH_SIZE - 1) // _EMBEDDING_BATCH_SIZE,
+        "batch_size": _EMBEDDING_BATCH_SIZE,
+        "success_count": sum(1 for e in all_embeddings if e is not None),
+        "failure_count": sum(1 for e in all_embeddings if e is None),
+    }
+    if embedding_dimensions is not None:
+        span_attrs["embedding_dimensions"] = embedding_dimensions
+    end_span(span, **span_attrs)
 
     return all_embeddings, errors
 

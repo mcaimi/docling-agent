@@ -23,7 +23,13 @@ try:
     from .chunking import chunk_document_records, chunk_document_records_hybrid
     from .embeddings import embed_texts
     from .vector_store import get_vector_store, store_chunk_embeddings
-    from ..utils.mlflow_tracing import session_context, run_context
+    from ..utils.mlflow_tracing import (
+        session_context,
+        run_context,
+        start_document_span,
+        start_child_span,
+        end_span,
+    )
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
 
@@ -190,20 +196,45 @@ def convert_doc(
             result = converter.convert(file_path)
             doc = _result_to_record(file_path, result, pipeline)
 
-            if enable_tracing:
-                with _ml.start_span("convert_pdf"):
-                    _ml.set_tag("pipeline", pipeline)
-                    _ml.set_tag("file", os.path.basename(file_path))
-                    _ml.set_tag("file_format", os.path.splitext(file_path)[1].lower())
-                    _ml.set_tag("page_count", result.input.page_count)
+            # Root span for this document's whole pipeline journey (convert ->
+            # chunk -> embed -> store). It isn't context-managed because its
+            # lifetime spans multiple independently-scheduled LangGraph tasks;
+            # each later stage closes it on its own last exit path -- see
+            # chunk_doc/embed_doc/store_doc below.
+            doc_span = start_document_span(
+                run_id, "document_pipeline", file=os.path.basename(file_path)
+            )
+            convert_span = start_child_span(run_id, doc_span, "convert_pdf")
+            end_span(
+                convert_span,
+                pipeline=pipeline,
+                file=os.path.basename(file_path),
+                file_format=os.path.splitext(file_path)[1].lower(),
+                page_count=result.input.page_count,
+            )
 
-            return {"doc": doc, "path": file_path, "error": None, "config": config}
+            return {
+                "doc": doc,
+                "path": file_path,
+                "error": None,
+                "config": config,
+                "mlflow_doc_span": doc_span,
+            }
         except Exception as e:
-            if enable_tracing:
-                with _ml.start_span("convert_pdf"):
-                    _ml.set_tag("error", str(e))
+            doc_span = start_document_span(
+                run_id, "document_pipeline", file=os.path.basename(file_path)
+            )
+            convert_span = start_child_span(run_id, doc_span, "convert_pdf")
+            end_span(convert_span, error=str(e))
+            end_span(doc_span, error=str(e))
             print(f"Error converting {file_path}: {e}")
-            return {"doc": None, "path": file_path, "error": str(e), "config": config}
+            return {
+                "doc": None,
+                "path": file_path,
+                "error": str(e),
+                "config": config,
+                "mlflow_doc_span": None,
+            }
 
 
 @task
@@ -229,47 +260,58 @@ def chunk_doc(
 
     with session_context(session_id), run_context(run_id):
         if result.get("error") or result["doc"] is None:
+            # Upstream (convert_doc) already closed the document span (or
+            # never created one) -- nothing to do with it here.
             return {
                 "chunks": [],
                 "path": result["path"],
                 "error": result["error"],
                 "config": config,
+                "mlflow_doc_span": None,
             }
 
         strategy = config.get("chunking_strategy")
         doc = result["doc"]
+        doc_span = result.get("mlflow_doc_span")
+        chunk_span = start_child_span(run_id, doc_span, "chunk_doc")
 
         try:
             if strategy == "hybrid":
-                chunks = chunk_document_records_hybrid([doc], run_id=run_id)
+                chunks = chunk_document_records_hybrid(
+                    [doc], run_id=run_id, parent_span=chunk_span
+                )
             else:
                 chunks = chunk_document_records(
                     [doc],
                     config.get("chunk_size", 1000),
                     config.get("chunk_overlap", 100),
                     run_id=run_id,
+                    parent_span=chunk_span,
                 )
         except Exception as e:
-            if enable_tracing:
-                with _ml.start_span("chunk_doc"):
-                    _ml.set_tag("error", str(e))
+            end_span(chunk_span, error=str(e))
+            end_span(doc_span, error=str(e))
             print(f"Error chunking {result['path']}: {e}")
             return {
                 "chunks": [],
                 "path": result["path"],
                 "error": str(e),
                 "config": config,
+                "mlflow_doc_span": None,
             }
 
-        if enable_tracing:
-            with _ml.start_span("chunk_doc"):
-                _ml.set_tag("chunking_strategy", strategy)
-                _ml.set_tag("chunk_count", len(chunks))
+        end_span(chunk_span, chunking_strategy=strategy, chunk_count=len(chunks))
 
         print(
             f" -> Chunking completed for path {result.get('path')}: produced {len(chunks)} chunks"
         )
-        return {"chunks": chunks, "path": result["path"], "error": None, "config": config}
+        return {
+            "chunks": chunks,
+            "path": result["path"],
+            "error": None,
+            "config": config,
+            "mlflow_doc_span": doc_span,
+        }
 
 
 @task
@@ -301,16 +343,26 @@ def embed_doc(
 
     with session_context(session_id), run_context(run_id):
         if result.get("error") or not result["chunks"]:
+            doc_span = result.get("mlflow_doc_span")
+            # If this is a genuine upstream error, chunk_doc already closed
+            # (or never created) the document span. If instead chunk_doc
+            # succeeded with zero chunks, there's nothing left for store_doc
+            # to do either, so close the document's trace here, cleanly.
+            if doc_span is not None and not result.get("error"):
+                end_span(doc_span)
             return {
                 "embeddings": [],
                 "path": result["path"],
                 "error": result["error"],
                 "embedding_error": None,
                 "config": config,
+                "mlflow_doc_span": None,
             }
 
         chunks = result["chunks"]
         texts = [c["content"] for c in chunks]
+        doc_span = result.get("mlflow_doc_span")
+        embed_span = start_child_span(run_id, doc_span, "embed_doc")
 
         # display info
         print(f" -> Embedding {len(texts)} chunks...")
@@ -323,6 +375,7 @@ def embed_doc(
                 config.get("embedding_api_key", ""),
                 config.get("embedding_dimensions"),
                 run_id=run_id,
+                parent_span=embed_span,
             )
             failed_count = sum(1 for v in vectors if v is None)
             embedding_error = (
@@ -331,22 +384,17 @@ def embed_doc(
                 if failed_count
                 else None
             )
-            if enable_tracing:
-                with _ml.start_span("embed_doc"):
-                    _ml.set_tag(
-                        "embedding_model", config.get("embedding_model", "unknown")
-                    )
-                    _ml.set_tag("chunk_count", len(texts))
-                    _ml.set_tag("embedding_count", len(vectors))
-                    _ml.set_tag(
-                        "non_null_count", sum(1 for v in vectors if v is not None)
-                    )
-                    if embedding_error:
-                        _ml.set_tag("embedding_error", embedding_error)
+            end_span(
+                embed_span,
+                error=embedding_error,
+                embedding_model=config.get("embedding_model", "unknown"),
+                chunk_count=len(texts),
+                embedding_count=len(vectors),
+                non_null_count=sum(1 for v in vectors if v is not None),
+            )
         except Exception as e:
-            if enable_tracing:
-                with _ml.start_span("embed_doc"):
-                    _ml.set_tag("error", str(e))
+            end_span(embed_span, error=str(e))
+            end_span(doc_span, error=str(e))
             raise
 
         print(f" -> Produced {len(vectors)} embeddings.")
@@ -359,6 +407,7 @@ def embed_doc(
             "error": None,
             "embedding_error": embedding_error,
             "config": config,
+            "mlflow_doc_span": doc_span,
         }
 
 
@@ -381,6 +430,7 @@ def store_doc(item: dict) -> dict:
     session_id = config.get("mlflow_session_id") if enable_tracing else None
     run_id = config.get("mlflow_run_id") if enable_tracing else None
     backend = (config.get("vector_store_backend") or "none").strip().lower()
+    doc_span = result.get("mlflow_doc_span")
 
     print(f" -> Vector store backend: {backend}")
 
@@ -396,20 +446,26 @@ def store_doc(item: dict) -> dict:
     }
 
     with session_context(session_id), run_context(run_id):
+        # This is the last stage for this document -- every exit path below
+        # must close doc_span exactly once, since nothing runs after it.
         if (
             backend in ("", "none")
             or result.get("error")
             or not result.get("chunks")
         ):
+            end_span(doc_span, error=result.get("error"))
             return base
 
         print(
             f" -> Storing embeddings for {os.path.basename(result['path'])} "
             f"({backend})..."
         )
+        store_span = start_child_span(run_id, doc_span, "store_doc")
         try:
             vector_store = get_vector_store(config)
             if vector_store is None:
+                end_span(store_span)
+                end_span(doc_span)
                 return base
 
             batch_size = max(1, int(config.get("vector_store_batch_size", 200)))
@@ -424,6 +480,8 @@ def store_doc(item: dict) -> dict:
                 write_mode=write_mode,
                 max_workers=max_workers,
                 config=config,
+                run_id=run_id,
+                parent_span=store_span,
             )
             stored_count = store_result["stored_count"]
             skipped = store_result["skipped_count"]
@@ -431,16 +489,18 @@ def store_doc(item: dict) -> dict:
             retry_count = store_result.get("retry_count", 0)
             failed_chunks = store_result.get("failed_chunks", [])
 
-            if enable_tracing:
-                with _ml.start_span("store_doc"):
-                    _ml.set_tag("backend", backend)
-                    _ml.set_tag("file", os.path.basename(result["path"]))
-                    _ml.set_tag("write_mode", write_mode)
-                    _ml.set_tag("stored_count", stored_count)
-                    _ml.set_tag("skipped_count", skipped)
-                    _ml.set_tag("upserted_count", upserted)
-                    _ml.set_tag("retry_count", retry_count)
-                    _ml.set_tag("failed_count", len(failed_chunks))
+            end_span(
+                store_span,
+                backend=backend,
+                file=os.path.basename(result["path"]),
+                write_mode=write_mode,
+                stored_count=stored_count,
+                skipped_count=skipped,
+                upserted_count=upserted,
+                retry_count=retry_count,
+                failed_count=len(failed_chunks),
+            )
+            end_span(doc_span)
 
             print(
                 f" -> Stored {stored_count} vectors ({skipped} skipped, "
@@ -454,10 +514,8 @@ def store_doc(item: dict) -> dict:
                 "failed_chunks": failed_chunks,
             }
         except Exception as e:
-            if enable_tracing:
-                with _ml.start_span("store_doc"):
-                    _ml.set_tag("backend", backend)
-                    _ml.set_tag("error", str(e))
+            end_span(store_span, backend=backend, error=str(e))
+            end_span(doc_span, error=str(e))
             print(f"Error storing vectors for {result['path']}: {e}")
             return {**base, "store_error": str(e)}
 
