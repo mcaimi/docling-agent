@@ -20,6 +20,7 @@ except ImportError as e:
 
 try:
     from ..utils.circuit_breaker import CircuitBreaker, CircuitBreakerError
+    from ..utils.mlflow_tracing import run_context
 except ImportError as e:
     raise ImportError(f"Failed to import circuit_breaker: {e}") from e
 
@@ -635,9 +636,12 @@ def store_chunk_embeddings(
 
     duration_ms = (time.time() - start_time) * 1000
 
-    # MLflow tracing
+    # MLflow tracing. Re-enters mlflow_run_id (when present in config) as the
+    # active run before creating the span -- this is typically called from a
+    # LangGraph task worker thread, whose context doesn't inherit the active
+    # run, so without it MLflow would spawn a new orphan run to hold the span.
     if enable_tracing:
-        with _ml.start_span("store_chunk_embeddings"):
+        with run_context(config.get("mlflow_run_id")), _ml.start_span("store_chunk_embeddings"):
             _ml.set_tag("write_mode", write_mode)
             _ml.set_tag("batch_size", batch_size)
             _ml.set_tag("max_workers", max_workers)
@@ -766,7 +770,7 @@ def delete_chunk_embeddings(
 
     # MLflow tracing
     if enable_tracing:
-        with _ml.start_span("delete_chunk_embeddings"):
+        with run_context(config.get("mlflow_run_id")), _ml.start_span("delete_chunk_embeddings"):
             _ml.log_metric("deleted_count", deleted_count)
             _ml.log_metric("failed_count", len(ids_to_delete) - deleted_count)
             _ml.log_metric("duration_ms", duration_ms)
@@ -866,7 +870,7 @@ def query_vector_store(
 
     # MLflow tracing
     if enable_tracing:
-        with _ml.start_span("query_vector_store"):
+        with run_context(config.get("mlflow_run_id")), _ml.start_span("query_vector_store"):
             _ml.set_tag("k", k)
             _ml.set_tag("has_filter", metadata_filter is not None)
             _ml.log_metric("result_count", len(results))

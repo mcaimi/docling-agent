@@ -27,6 +27,8 @@ import os
 import threading
 from typing import Any
 
+from ..utils.mlflow_tracing import run_context
+
 # check if tracing is enabled
 enable_tracing = int(os.getenv("ENABLE_TRACING", "0")) == 1
 
@@ -147,6 +149,7 @@ def embed_texts(
     base_url: str,
     api_key: str,
     dimensions: int | None = None,
+    run_id: str | None = None,
 ) -> tuple[list[list[float] | None], list[str]]:
     """
     Request embeddings for all texts using batched API calls.
@@ -162,6 +165,12 @@ def embed_texts(
     request. Only a subset of embedding models (e.g. OpenAI's
     ``text-embedding-3-*`` family) accept this parameter -- leave it unset
     (the default) for models that don't.
+
+    ``run_id``, when set, re-enters that run as active before creating this
+    call's MLflow span (see ``utils.mlflow_tracing.run_context``). Needed
+    because this is typically called from a LangGraph task worker thread, whose
+    context doesn't inherit the active run from the thread that started it --
+    without it, MLflow would spawn a new orphan run to hold the span instead.
 
     Returns a ``(embeddings, errors)`` tuple. ``embeddings`` is in the same
     order as input texts; ``errors`` holds one message per failed batch (empty
@@ -191,7 +200,7 @@ def embed_texts(
                     break
 
     if enable_tracing:
-        with _ml.start_span("embed_texts"):
+        with run_context(run_id), _ml.start_span("embed_texts"):
             _ml.set_tag("model", model)
             _ml.set_tag("text_count", len(texts))
             _ml.set_tag("batch_count", (len(texts) + _EMBEDDING_BATCH_SIZE - 1) // _EMBEDDING_BATCH_SIZE)

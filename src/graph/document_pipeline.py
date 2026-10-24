@@ -23,7 +23,7 @@ try:
     from .chunking import chunk_document_records, chunk_document_records_hybrid
     from .embeddings import embed_texts
     from .vector_store import get_vector_store, store_chunk_embeddings
-    from ..utils.mlflow_tracing import session_context
+    from ..utils.mlflow_tracing import session_context, run_context
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
 
@@ -160,6 +160,11 @@ def convert_doc(
     requested_pipeline = config.get("conversion_pipeline")
     pipeline = _effective_pipeline(file_path, requested_pipeline)
     session_id = config.get("mlflow_session_id") if enable_tracing else None
+    # Passed to run_context() below: LangGraph runs this task in a worker thread
+    # whose context doesn't inherit the active run from the main thread, so
+    # without re-entering it explicitly each span here would spawn its own
+    # orphan MLflow run.
+    run_id = config.get("mlflow_run_id") if enable_tracing else None
 
     # displayinfo
     print(
@@ -172,7 +177,7 @@ def convert_doc(
         )
     )
 
-    with session_context(session_id):
+    with session_context(session_id), run_context(run_id):
         try:
             converter = _new_converter(
                 pipeline=pipeline,
@@ -220,8 +225,9 @@ def chunk_doc(
     result = converted_task.result()
     config = result.get("config", {})
     session_id = config.get("mlflow_session_id") if enable_tracing else None
+    run_id = config.get("mlflow_run_id") if enable_tracing else None
 
-    with session_context(session_id):
+    with session_context(session_id), run_context(run_id):
         if result.get("error") or result["doc"] is None:
             return {
                 "chunks": [],
@@ -235,12 +241,13 @@ def chunk_doc(
 
         try:
             if strategy == "hybrid":
-                chunks = chunk_document_records_hybrid([doc])
+                chunks = chunk_document_records_hybrid([doc], run_id=run_id)
             else:
                 chunks = chunk_document_records(
                     [doc],
                     config.get("chunk_size", 1000),
                     config.get("chunk_overlap", 100),
+                    run_id=run_id,
                 )
         except Exception as e:
             if enable_tracing:
@@ -290,8 +297,9 @@ def embed_doc(
     result = chunked_task.result()
     config = result.get("config", {})
     session_id = config.get("mlflow_session_id") if enable_tracing else None
+    run_id = config.get("mlflow_run_id") if enable_tracing else None
 
-    with session_context(session_id):
+    with session_context(session_id), run_context(run_id):
         if result.get("error") or not result["chunks"]:
             return {
                 "embeddings": [],
@@ -314,6 +322,7 @@ def embed_doc(
                 config.get("embedding_base_url"),
                 config.get("embedding_api_key", ""),
                 config.get("embedding_dimensions"),
+                run_id=run_id,
             )
             failed_count = sum(1 for v in vectors if v is None)
             embedding_error = (
@@ -370,6 +379,7 @@ def store_doc(item: dict) -> dict:
     result = embedded_task.result()
     config = result.get("config", {})
     session_id = config.get("mlflow_session_id") if enable_tracing else None
+    run_id = config.get("mlflow_run_id") if enable_tracing else None
     backend = (config.get("vector_store_backend") or "none").strip().lower()
 
     print(f" -> Vector store backend: {backend}")
@@ -385,7 +395,7 @@ def store_doc(item: dict) -> dict:
         "store_error": None,
     }
 
-    with session_context(session_id):
+    with session_context(session_id), run_context(run_id):
         if (
             backend in ("", "none")
             or result.get("error")

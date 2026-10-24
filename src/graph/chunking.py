@@ -11,6 +11,8 @@ except ImportError as e:
 
 import os
 
+from ..utils.mlflow_tracing import run_context
+
 # check if tracing is enabled
 enable_tracing = int(os.getenv("ENABLE_TRACING", "0")) == 1
 
@@ -26,6 +28,7 @@ def chunk_document_records(
     documents: list[dict[str, Any]],
     chunk_size: int,
     chunk_overlap: int,
+    run_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Split each document's ``content`` into overlapping chunks.
@@ -77,7 +80,7 @@ def chunk_document_records(
             )
 
     if enable_tracing:
-        with _ml.start_span("chunk_fixed"):
+        with run_context(run_id), _ml.start_span("chunk_fixed"):
             _ml.set_tag("chunk_size", chunk_size)
             _ml.set_tag("chunk_overlap", chunk_overlap)
             _ml.set_tag("total_chunks", len(chunked_docs))
@@ -88,6 +91,7 @@ def chunk_document_records(
 # HybridChunker using docling APIs
 def chunk_document_records_hybrid(
     documents: list[dict[str, Any]],
+    run_id: str | None = None,
 ) -> list[dict[str, Any]]:
     # chunking results
     chunked_docs: list[dict[str, Any]] = []
@@ -118,7 +122,7 @@ def chunk_document_records_hybrid(
             )
 
     if enable_tracing:
-        with _ml.start_span("chunk_hybrid"):
+        with run_context(run_id), _ml.start_span("chunk_hybrid"):
             _ml.set_tag("total_chunks", len(chunked_docs))
 
     return chunked_docs

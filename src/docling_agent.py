@@ -137,6 +137,12 @@ def _run_workflow_with_mlflow(agent_settings: dict[str, Any]) -> dict[str, Any]:
     with mlflow.start_run(run_name=run_name) as run:
         session_id = agent_settings.get("mlflow_session_id") or run.info.run_id
         agent_settings["mlflow_session_id"] = session_id
+        # Propagated to every task-level span (see document_pipeline.py, chunking.py,
+        # embeddings.py, vector_store.py, via utils.mlflow_tracing.run_context) so
+        # spans created in LangGraph's worker threads attach to this run instead of
+        # each spawning its own orphan run -- MLflow's active-run tracking is
+        # per-thread and doesn't reach those threads.
+        agent_settings["mlflow_run_id"] = run.info.run_id
         mlflow.set_tag("mlflow.trace.session", session_id)
 
         sanitised = {
