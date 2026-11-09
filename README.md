@@ -352,18 +352,19 @@ See [tests/README.md](tests/README.md) for detailed instructions.
 
 Declared in `pyproject.toml`:
 
-- `docling>=2.93.0`
-- `langchain>=1.3.1` (MLflow LangChain autolog)
-- `langgraph>=1.2.0`
-- `mlflow>=3.12.0`
-- `openai>=2.30.0`
+- `docling>=2.142.1`
+- `httpx2>=2.16.0` (openai>=3's HTTP transport)
+- `langchain>=1.4.7` (MLflow LangChain autolog)
+- `langgraph>=1.2.16`
+- `mlflow>=3.17.2`
+- `openai>=3.37.0`
 - `python-dotenv>=1.2.2`
 - `tenacity>=9.0.0` (retry with exponential backoff)
 
 Optional extras:
 
 - `chroma`: `langchain-chroma>=1.1.0`
-- `milvus`: `langchain-milvus>=0.3.3`
+- `milvus`: `langchain-milvus>=0.4.0`
 - `vector-stores`: both backends
 - `dev`: `pytest>=8.0.0`, `pytest-asyncio>=0.23.0`, `requests>=2.31.0`
 

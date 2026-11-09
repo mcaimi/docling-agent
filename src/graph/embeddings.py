@@ -10,7 +10,11 @@ try:
         InternalServerError,
         RateLimitError,
     )
-    import httpx
+    # openai>=3 moved its HTTP transport to httpx2 (OpenAI.__init__'s
+    # http_client parameter is typed httpx2.Client, not the classic httpx's).
+    # A classic httpx.Client happens to still be accepted today via an
+    # undocumented compatibility path, but that's not the supported API.
+    import httpx2
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
 
@@ -19,19 +23,10 @@ try:
 except ImportError as e:
     raise ImportError(f"tenacity is required: {e}") from e
 
-import os
 import threading
 from typing import Any
 
-# check if tracing is enabled
-enable_tracing = int(os.getenv("ENABLE_TRACING", "0")) == 1
-
-if enable_tracing:
-    try:
-        import mlflow as _ml
-    except ImportError:
-        print("MLflow is not installed. Tracing is disabled.")
-        enable_tracing = False
+from ..utils.mlflow_tracing import start_child_span, end_span
 
 # OpenAI embeddings API batch size limit
 # Reference: https://platform.openai.com/docs/api-reference/embeddings
@@ -78,14 +73,14 @@ def get_embedding_client(base_url: str, api_key: str) -> OpenAI:
         if client is not None:
             return client
 
-        # Configure httpx client with connection pooling
-        http_client = httpx.Client(
-            limits=httpx.Limits(
+        # Configure httpx2 client with connection pooling
+        http_client = httpx2.Client(
+            limits=httpx2.Limits(
                 max_connections=100,
                 max_keepalive_connections=20,
                 keepalive_expiry=30.0,
             ),
-            timeout=httpx.Timeout(60.0, connect=10.0),
+            timeout=httpx2.Timeout(60.0, connect=10.0),
         )
 
         client = OpenAI(
@@ -143,6 +138,8 @@ def embed_texts(
     base_url: str,
     api_key: str,
     dimensions: int | None = None,
+    run_id: str | None = None,
+    parent_span: Any = None,
 ) -> tuple[list[list[float] | None], list[str]]:
     """
     Request embeddings for all texts using batched API calls.
@@ -158,6 +155,12 @@ def embed_texts(
     request. Only a subset of embedding models (e.g. OpenAI's
     ``text-embedding-3-*`` family) accept this parameter -- leave it unset
     (the default) for models that don't.
+
+    ``run_id``/``parent_span``, when set, create this call's MLflow span as a
+    child of ``parent_span`` on that run (see ``utils.mlflow_tracing``). Needed
+    because this is typically called from a LangGraph task worker thread, whose
+    context doesn't inherit the active run from the thread that started it --
+    without it, MLflow would spawn a new orphan run to hold the span instead.
 
     Returns a ``(embeddings, errors)`` tuple. ``embeddings`` is in the same
     order as input texts; ``errors`` holds one message per failed batch (empty
@@ -186,16 +189,18 @@ def embed_texts(
                     embedding_dimensions = len(emb)
                     break
 
-    if enable_tracing:
-        with _ml.start_span("embed_texts"):
-            _ml.set_tag("model", model)
-            _ml.set_tag("text_count", len(texts))
-            _ml.set_tag("batch_count", (len(texts) + _EMBEDDING_BATCH_SIZE - 1) // _EMBEDDING_BATCH_SIZE)
-            _ml.set_tag("batch_size", _EMBEDDING_BATCH_SIZE)
-            if embedding_dimensions is not None:
-                _ml.set_tag("embedding_dimensions", embedding_dimensions)
-            _ml.set_tag("success_count", sum(1 for e in all_embeddings if e is not None))
-            _ml.set_tag("failure_count", sum(1 for e in all_embeddings if e is None))
+    span = start_child_span(run_id, parent_span, "embed_texts")
+    span_attrs = {
+        "model": model,
+        "text_count": len(texts),
+        "batch_count": (len(texts) + _EMBEDDING_BATCH_SIZE - 1) // _EMBEDDING_BATCH_SIZE,
+        "batch_size": _EMBEDDING_BATCH_SIZE,
+        "success_count": sum(1 for e in all_embeddings if e is not None),
+        "failure_count": sum(1 for e in all_embeddings if e is None),
+    }
+    if embedding_dimensions is not None:
+        span_attrs["embedding_dimensions"] = embedding_dimensions
+    end_span(span, **span_attrs)
 
     return all_embeddings, errors
 

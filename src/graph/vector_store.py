@@ -20,6 +20,7 @@ except ImportError as e:
 
 try:
     from ..utils.circuit_breaker import CircuitBreaker, CircuitBreakerError
+    from ..utils.mlflow_tracing import run_context, start_child_span, end_span
 except ImportError as e:
     raise ImportError(f"Failed to import circuit_breaker: {e}") from e
 
@@ -449,6 +450,8 @@ def store_chunk_embeddings(
     write_mode: WriteMode = "insert",
     max_workers: int = 4,
     config: dict[str, Any] | None = None,
+    run_id: str | None = None,
+    parent_span: Any = None,
 ) -> dict[str, Any]:
     """
     Persist precomputed embeddings for chunk records.
@@ -469,6 +472,11 @@ def store_chunk_embeddings(
         Number of parallel batch workers (default: 4)
     config : dict | None
         Configuration dict for circuit breaker and retry settings
+    run_id : str | None
+        When set, records a child span of ``parent_span`` on that MLflow run
+        for this call (see ``utils.mlflow_tracing``)
+    parent_span : Any
+        Span this call's span should nest under (typically store_doc's span)
 
     Returns
     -------
@@ -635,12 +643,12 @@ def store_chunk_embeddings(
 
     duration_ms = (time.time() - start_time) * 1000
 
-    # MLflow tracing
+    # MLflow tracing. Re-enters mlflow_run_id (when present in config) as the
+    # active run before logging -- this is typically called from a LangGraph
+    # task worker thread, whose context doesn't inherit the active run, so
+    # without it MLflow would spawn a new orphan run to hold these metrics.
     if enable_tracing:
-        with _ml.start_span("store_chunk_embeddings"):
-            _ml.set_tag("write_mode", write_mode)
-            _ml.set_tag("batch_size", batch_size)
-            _ml.set_tag("max_workers", max_workers)
+        with run_context(config.get("mlflow_run_id")):
             _ml.log_metric("stored_count", len(stored_ids))
             _ml.log_metric("skipped_count", skipped_count)
             _ml.log_metric("upserted_count", deleted_count if write_mode == "upsert" else 0)
@@ -652,6 +660,21 @@ def store_chunk_embeddings(
                 _ml.log_metric(
                     "throughput_vectors_per_sec", len(stored_ids) / (duration_ms / 1000)
                 )
+
+    # When called from store_doc (run_id/parent_span passed explicitly), also
+    # record this as a child span of that document's trace.
+    span = start_child_span(run_id, parent_span, "store_chunk_embeddings")
+    end_span(
+        span,
+        write_mode=write_mode,
+        batch_size=batch_size,
+        max_workers=max_workers,
+        stored_count=len(stored_ids),
+        skipped_count=skipped_count,
+        retry_count=total_retry_count,
+        failed_count=len(failed_chunks),
+        duration_ms=duration_ms,
+    )
 
     return {
         "stored_count": len(stored_ids),
@@ -766,7 +789,7 @@ def delete_chunk_embeddings(
 
     # MLflow tracing
     if enable_tracing:
-        with _ml.start_span("delete_chunk_embeddings"):
+        with run_context(config.get("mlflow_run_id")), _ml.start_span("delete_chunk_embeddings"):
             _ml.log_metric("deleted_count", deleted_count)
             _ml.log_metric("failed_count", len(ids_to_delete) - deleted_count)
             _ml.log_metric("duration_ms", duration_ms)
@@ -866,7 +889,7 @@ def query_vector_store(
 
     # MLflow tracing
     if enable_tracing:
-        with _ml.start_span("query_vector_store"):
+        with run_context(config.get("mlflow_run_id")), _ml.start_span("query_vector_store"):
             _ml.set_tag("k", k)
             _ml.set_tag("has_filter", metadata_filter is not None)
             _ml.log_metric("result_count", len(results))
