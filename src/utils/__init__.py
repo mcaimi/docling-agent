@@ -2,6 +2,7 @@
 
 from .json_parse import _parse_json_object_env
 from .json_parse import _parse_json_object_str
+from .logging_setup import configure_logging
 from .uuids import generate_uuid, is_valid_uuid, generate_mlflow_run_name
 from .mlflow_tracing import (
     session_context,
@@ -15,6 +16,7 @@ from .mlflow_tracing import (
 __all__ = [
     "_parse_json_object_env",
     "_parse_json_object_str",
+    "configure_logging",
     "generate_uuid",
     "is_valid_uuid",
     "generate_mlflow_run_name",

@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import json
+import logging
 from typing import Any
 
 try:
@@ -9,6 +10,8 @@ try:
     from .prompts.extractor import _CONFIG_KEYS, _SENSITIVE_KEYS
 except ImportError as e:
     raise ImportError(f"openai package is required: {e}") from e
+
+logger = logging.getLogger(__name__)
 
 # Keys with a fixed, known-good set of values. The extraction LLM is free-text
 # driven (untrusted input in, structured output expected), so its output is
@@ -76,7 +79,7 @@ def extract_config_from_prompt(
     defaults = {k: None for k in _CONFIG_KEYS}
 
     if not user_prompt or not user_prompt.strip():
-        print("No User Prompt. Using Defaults...")
+        logger.info("No User Prompt. Using Defaults...")
         return defaults
 
     client = OpenAI(base_url=base_url, api_key=api_key)
@@ -95,7 +98,7 @@ def extract_config_from_prompt(
         )
         text = response.choices[0].message.content or ""
     except Exception as e:
-        print(f"LLM Exception {e}")
+        logger.warning("LLM Exception %s", e)
         return defaults
 
     # Strip markdown code fences if present
@@ -137,7 +140,7 @@ def merge_overrides(state: dict, overrides: dict) -> dict:
         if k not in state:
             continue
         if not _is_valid_override(k, state.get(k), value):
-            print(f"Ignoring invalid NLP-extracted override for '{k}': {value!r}")
+            logger.warning("Ignoring invalid NLP-extracted override for %r: %r", k, value)
             continue
         # enum values are validated case-insensitively; normalize before storing
         # so downstream exact-match comparisons (e.g. `strategy == "hybrid"`) hold

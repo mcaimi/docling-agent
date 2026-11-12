@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 """Per-document parallel processing tasks using langgraph.func API."""
 
+import logging
 import os
+import time
 from typing import Any, Literal
 
 from langgraph.types import RunnableConfig
@@ -43,6 +45,8 @@ SUPPORTED_INPUT_FORMATS: tuple[InputFormat, ...] = (
     InputFormat.LATEX,
 )
 
+logger = logging.getLogger(__name__)
+
 # check if tracing is enabled
 enable_tracing = int(os.getenv("ENABLE_TRACING", "0")) == 1
 
@@ -50,7 +54,7 @@ if enable_tracing:
     try:
         import mlflow as _ml
     except ImportError:
-        print("MLflow is not installed. Tracing is disabled.")
+        logger.warning("MLflow is not installed. Tracing is disabled.")
         enable_tracing = False
 
 def _file_path_from_item(item: dict) -> str:
@@ -172,18 +176,35 @@ def convert_doc(
     # orphan MLflow run.
     run_id = config.get("mlflow_run_id") if enable_tracing else None
 
-    # displayinfo
-    print(
-        f" -> conversion task in path {os.path.basename(file_path)}, "
-        f"using pipeline mode: {pipeline}"
-        + (
-            f" (VLM skipped for non-PDF; requested {requested_pipeline})"
-            if pipeline != requested_pipeline
-            else ""
-        )
+    file_name = os.path.basename(file_path)
+    file_format = os.path.splitext(file_path)[1].lower()
+    # Root-span attributes: let the scheduler build its per-document view
+    # from traces alone.
+    doc_attributes = {
+        "file": file_name,
+        "file_format": file_format,
+        "shard_index": config.get("shard_index", 0),
+    }
+
+    logger.info(
+        " -> conversion task in path %s, using pipeline mode: %s%s",
+        file_name,
+        pipeline,
+        f" (VLM skipped for non-PDF; requested {requested_pipeline})"
+        if pipeline != requested_pipeline
+        else "",
+        extra={"file": file_name, "stage": "convert"},
     )
 
     with session_context(session_id), run_context(run_id):
+        # Root span for this document's whole pipeline journey (convert ->
+        # chunk -> embed -> store). It isn't context-managed because its
+        # lifetime spans multiple independently-scheduled LangGraph tasks;
+        # each later stage closes it on its own last exit path -- see
+        # chunk_doc/embed_doc/store_doc below. Both spans start before the
+        # conversion so its duration is part of the trace.
+        doc_span = start_document_span(run_id, "document_pipeline", **doc_attributes)
+        convert_span = start_child_span(run_id, doc_span, "convert_pdf")
         try:
             converter = _new_converter(
                 pipeline=pipeline,
@@ -195,21 +216,11 @@ def convert_doc(
 
             result = converter.convert(file_path)
             doc = _result_to_record(file_path, result, pipeline)
-
-            # Root span for this document's whole pipeline journey (convert ->
-            # chunk -> embed -> store). It isn't context-managed because its
-            # lifetime spans multiple independently-scheduled LangGraph tasks;
-            # each later stage closes it on its own last exit path -- see
-            # chunk_doc/embed_doc/store_doc below.
-            doc_span = start_document_span(
-                run_id, "document_pipeline", file=os.path.basename(file_path)
-            )
-            convert_span = start_child_span(run_id, doc_span, "convert_pdf")
             end_span(
                 convert_span,
                 pipeline=pipeline,
-                file=os.path.basename(file_path),
-                file_format=os.path.splitext(file_path)[1].lower(),
+                file=file_name,
+                file_format=file_format,
                 page_count=result.input.page_count,
             )
 
@@ -221,13 +232,12 @@ def convert_doc(
                 "mlflow_doc_span": doc_span,
             }
         except Exception as e:
-            doc_span = start_document_span(
-                run_id, "document_pipeline", file=os.path.basename(file_path)
-            )
-            convert_span = start_child_span(run_id, doc_span, "convert_pdf")
             end_span(convert_span, error=str(e))
-            end_span(doc_span, error=str(e))
-            print(f"Error converting {file_path}: {e}")
+            end_span(doc_span, error=str(e), stage_failed="convert")
+            logger.error(
+                "Error converting %s: %s", file_path, e,
+                extra={"file": file_name, "stage": "convert"},
+            )
             return {
                 "doc": None,
                 "path": file_path,
@@ -290,8 +300,11 @@ def chunk_doc(
                 )
         except Exception as e:
             end_span(chunk_span, error=str(e))
-            end_span(doc_span, error=str(e))
-            print(f"Error chunking {result['path']}: {e}")
+            end_span(doc_span, error=str(e), stage_failed="chunk")
+            logger.error(
+                "Error chunking %s: %s", result["path"], e,
+                extra={"file": os.path.basename(result["path"]), "stage": "chunk"},
+            )
             return {
                 "chunks": [],
                 "path": result["path"],
@@ -302,8 +315,11 @@ def chunk_doc(
 
         end_span(chunk_span, chunking_strategy=strategy, chunk_count=len(chunks))
 
-        print(
-            f" -> Chunking completed for path {result.get('path')}: produced {len(chunks)} chunks"
+        logger.info(
+            " -> Chunking completed for path %s: produced %d chunks",
+            result.get("path"),
+            len(chunks),
+            extra={"file": os.path.basename(result["path"]), "stage": "chunk"},
         )
         return {
             "chunks": chunks,
@@ -349,7 +365,7 @@ def embed_doc(
             # succeeded with zero chunks, there's nothing left for store_doc
             # to do either, so close the document's trace here, cleanly.
             if doc_span is not None and not result.get("error"):
-                end_span(doc_span)
+                end_span(doc_span, chunk_count=0, stored_count=0)
             return {
                 "embeddings": [],
                 "path": result["path"],
@@ -364,8 +380,8 @@ def embed_doc(
         doc_span = result.get("mlflow_doc_span")
         embed_span = start_child_span(run_id, doc_span, "embed_doc")
 
-        # display info
-        print(f" -> Embedding {len(texts)} chunks...")
+        log_extra = {"file": os.path.basename(result["path"]), "stage": "embed"}
+        logger.info(" -> Embedding %d chunks...", len(texts), extra=log_extra)
 
         try:
             vectors, embed_errors = embed_texts(
@@ -394,12 +410,12 @@ def embed_doc(
             )
         except Exception as e:
             end_span(embed_span, error=str(e))
-            end_span(doc_span, error=str(e))
+            end_span(doc_span, error=str(e), stage_failed="embed")
             raise
 
-        print(f" -> Produced {len(vectors)} embeddings.")
+        logger.info(" -> Produced %d embeddings.", len(vectors), extra=log_extra)
         if embedding_error:
-            print(f" -> {embedding_error}")
+            logger.warning(" -> %s", embedding_error, extra=log_extra)
         return {
             "chunks": chunks,
             "embeddings": vectors,
@@ -431,8 +447,14 @@ def store_doc(item: dict) -> dict:
     run_id = config.get("mlflow_run_id") if enable_tracing else None
     backend = (config.get("vector_store_backend") or "none").strip().lower()
     doc_span = result.get("mlflow_doc_span")
+    log_extra = {"file": os.path.basename(result["path"]), "stage": "store"}
+    # Attributes set on the document's root span on every exit path below.
+    doc_summary = {
+        "chunk_count": len(result.get("chunks", [])),
+        "embedding_failed": bool(result.get("embedding_error")),
+    }
 
-    print(f" -> Vector store backend: {backend}")
+    logger.debug(" -> Vector store backend: %s", backend, extra=log_extra)
 
     base = {
         "chunks": result.get("chunks", []),
@@ -453,19 +475,23 @@ def store_doc(item: dict) -> dict:
             or result.get("error")
             or not result.get("chunks")
         ):
-            end_span(doc_span, error=result.get("error"))
+            end_span(
+                doc_span, error=result.get("error"), stored_count=0, **doc_summary
+            )
             return base
 
-        print(
-            f" -> Storing embeddings for {os.path.basename(result['path'])} "
-            f"({backend})..."
+        logger.info(
+            " -> Storing embeddings for %s (%s)...",
+            os.path.basename(result["path"]),
+            backend,
+            extra=log_extra,
         )
         store_span = start_child_span(run_id, doc_span, "store_doc")
         try:
             vector_store = get_vector_store(config)
             if vector_store is None:
                 end_span(store_span)
-                end_span(doc_span)
+                end_span(doc_span, stored_count=0, **doc_summary)
                 return base
 
             batch_size = max(1, int(config.get("vector_store_batch_size", 200)))
@@ -500,11 +526,21 @@ def store_doc(item: dict) -> dict:
                 retry_count=retry_count,
                 failed_count=len(failed_chunks),
             )
-            end_span(doc_span)
+            end_span(
+                doc_span,
+                stored_count=stored_count,
+                failed_chunk_count=len(failed_chunks),
+                **doc_summary,
+            )
 
-            print(
-                f" -> Stored {stored_count} vectors ({skipped} skipped, "
-                f"{upserted} upserted, {retry_count} retries, {len(failed_chunks)} failed)."
+            logger.info(
+                " -> Stored %d vectors (%d skipped, %d upserted, %d retries, %d failed).",
+                stored_count,
+                skipped,
+                upserted,
+                retry_count,
+                len(failed_chunks),
+                extra=log_extra,
             )
             return {
                 **base,
@@ -515,8 +551,12 @@ def store_doc(item: dict) -> dict:
             }
         except Exception as e:
             end_span(store_span, backend=backend, error=str(e))
-            end_span(doc_span, error=str(e))
-            print(f"Error storing vectors for {result['path']}: {e}")
+            end_span(
+                doc_span, error=str(e), stage_failed="store", stored_count=0, **doc_summary
+            )
+            logger.error(
+                "Error storing vectors for %s: %s", result["path"], e, extra=log_extra
+            )
             return {**base, "store_error": str(e)}
 
 
@@ -531,6 +571,66 @@ def _max_concurrency_from_config(config: RunnableConfig) -> int:
         return os.cpu_count() or 1
 
 
+def progress_metrics(results: list[dict]) -> dict[str, int]:
+    """Cumulative counters over the per-document results produced so far.
+
+    Names match the end-of-run metrics, so the latest logged value of each is
+    also the final one.
+    """
+    metrics = {
+        "docs_completed": len(results),
+        "docs_failed": 0,
+        "total_chunks": 0,
+        "total_embeddings": 0,
+        "non_null_embeddings": 0,
+        "vectors_stored": 0,
+        "vectors_upserted": 0,
+        "vector_store_retry_count": 0,
+        "failed_chunk_count": 0,
+        "error_count": 0,
+        "vector_store_error_count": 0,
+    }
+    for r in results:
+        embeddings = r.get("embeddings", [])
+        metrics["docs_failed"] += bool(r.get("error") or r.get("store_error"))
+        metrics["total_chunks"] += len(r.get("chunks", []))
+        metrics["total_embeddings"] += len(embeddings)
+        metrics["non_null_embeddings"] += sum(1 for e in embeddings if e is not None)
+        metrics["vectors_stored"] += r.get("stored_count", 0)
+        metrics["vectors_upserted"] += r.get("upserted_count", 0)
+        metrics["vector_store_retry_count"] += r.get("retry_count", 0)
+        metrics["failed_chunk_count"] += len(r.get("failed_chunks", []))
+        metrics["error_count"] += sum(
+            1 for k in ("error", "embedding_error", "store_error") if r.get(k)
+        )
+        metrics["vector_store_error_count"] += bool(r.get("store_error"))
+    return metrics
+
+
+def _log_progress(run_id: str | None, results: list[dict]) -> None:
+    """Log cumulative progress metrics to ``run_id`` with ``step=docs_completed``.
+
+    Uses ``MlflowClient`` with an explicit run id rather than the fluent API:
+    this runs in LangGraph's entrypoint thread, which has no active run.
+    Metric logging failures never fail the pipeline.
+    """
+    if not run_id:
+        return
+    try:
+        from mlflow import MlflowClient
+        from mlflow.entities import Metric
+
+        metrics = progress_metrics(results)
+        step = metrics["docs_completed"]
+        timestamp = int(time.time() * 1000)
+        MlflowClient().log_batch(
+            run_id,
+            metrics=[Metric(k, v, timestamp, step) for k, v in metrics.items()],
+        )
+    except Exception as e:
+        logger.warning("Failed to log progress metrics: %s", e)
+
+
 @entrypoint()
 def document_workflow(
     input_data: list[dict],
@@ -543,12 +643,16 @@ def document_workflow(
     CPU count). Documents are processed in batches; each batch runs convert, chunk,
     embed, and store for up to that many documents before the next batch starts.
 
+    When ``config["configurable"]["mlflow_run_id"]`` is set, cumulative progress
+    metrics (see ``progress_metrics``) are logged to that run after every batch.
+
     Parameters
     ----------
     input_data : list[dict]
         List of dicts, each with ``file_path`` (or legacy ``pdf_path``) and ``config``.
     config : RunnableConfig
-        Run config; ``configurable.max_concurrency`` limits parallel document pipelines.
+        Run config; ``configurable.max_concurrency`` limits parallel document pipelines,
+        ``configurable.mlflow_run_id`` enables per-batch progress metrics.
 
     Returns
     -------
@@ -557,8 +661,9 @@ def document_workflow(
         "store_error", "path", "error", and "config".
     """
     max_conc = _max_concurrency_from_config(config)
+    run_id = (config or {}).get("configurable", {}).get("mlflow_run_id")
     results: list[dict] = []
-    print(f" -> Running document workflow with max concurrency: {max_conc}")
+    logger.info(" -> Running document workflow with max concurrency: %d", max_conc)
 
     for start in range(0, len(input_data), max_conc):
         batch = input_data[start : start + max_conc]
@@ -575,6 +680,10 @@ def document_workflow(
         embedded = [embed_doc({"chunked": t}) for t in chunked]
         stored = [store_doc({"embedded": t}) for t in embedded]
         results.extend(t.result() for t in stored)
+        _log_progress(run_id, results)
 
-    print(f" -> Document workflow completed with {len(results)} results")
+    if not input_data:
+        _log_progress(run_id, results)
+
+    logger.info(" -> Document workflow completed with %d results", len(results))
     return results
