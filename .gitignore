@@ -12,3 +12,6 @@ wheels/
 # custom dotenv
 **/env.local
 .env
+
+# mlruns
+mlruns
