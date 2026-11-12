@@ -4,6 +4,9 @@
 #
 #   podman build -t docling-agent -f Containerfile .
 #   podman run --rm -v ./pdfs:/data/in:ro,Z -e VECTOR_STORE_BACKEND=none docling-agent
+#
+# With SOURCE_BACKEND=s3, documents are downloaded one at a time per worker into
+# TMPDIR (default /tmp): budget ~MAX_CONCURRENCY x the largest document there.
 
 ARG PYTHON_VERSION=3.11
 
@@ -16,7 +19,7 @@ WORKDIR /app
 # dependencies first, so source changes don't invalidate this layer
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --extra vector-stores
+    uv sync --frozen --no-dev --extra vector-stores --extra s3
 
 # docling's default model set, fetched at build time so runs need no
 # Hugging Face access and start without a download
