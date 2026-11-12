@@ -1,0 +1,19 @@
+# never bake configuration or secrets into the image
+.env
+.env.*
+**/env.local
+
+.git
+.venv
+**/__pycache__
+*.py[oc]
+build/
+dist/
+*.egg-info
+
+tests/
+docs/
+mlruns/
+traces
+Containerfile
+.containerignore
