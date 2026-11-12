@@ -90,6 +90,27 @@ def test_new_settings_defaults(clean_env):
     assert settings["mlflow_parent_run_id"] is None
     assert settings["scheduler_run_id"] is None
     assert settings["mlflow_langchain_autolog"] == 0  # opt-in, see settings_spec
+    assert settings["source_backend"] == "local"
+    assert settings["s3_bucket"] is None
+    assert settings["s3_prefix"] == ""
+    assert settings["s3_recursive"] == 0
+    assert settings["s3_addressing_style"] == "auto"
+    assert settings["s3_verify_ssl"] == 1
+
+
+def test_s3_settings_fall_back_to_aws_env(clean_env):
+    clean_env.setenv("AWS_ACCESS_KEY_ID", "aws-id")
+    clean_env.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+    clean_env.setenv("AWS_DEFAULT_REGION", "eu-west-1")
+    settings = _get_settings_from_environment()
+    assert settings["s3_access_key_id"] == "aws-id"
+    assert settings["s3_secret_access_key"] == "aws-secret"
+    assert settings["s3_region"] == "eu-west-1"
+    clean_env.setenv("S3_ACCESS_KEY_ID", "s3-id")
+    clean_env.setenv("AWS_REGION", "us-east-2")
+    settings = _get_settings_from_environment()
+    assert settings["s3_access_key_id"] == "s3-id"
+    assert settings["s3_region"] == "us-east-2"
 
 
 def test_env_values_are_parsed(clean_env):
@@ -154,6 +175,7 @@ def test_missing_envfile_raises(clean_env, tmp_path):
 def test_sensitive_keys():
     assert SENSITIVE_SETTING_KEYS == {
         "api_key", "embedding_api_key", "vlm_api_headers", "vlm_api_params", "milvus_token",
+        "s3_access_key_id", "s3_secret_access_key", "s3_session_token",
     }
 
 

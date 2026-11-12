@@ -25,6 +25,10 @@ def base_state():
         "embedding_api_key": "real-embedding-key",
         "vlm_api_url": "https://api.openai.com/v1",
         "vlm_api_headers": {},
+        "source_backend": "local",
+        "s3_bucket": "real-bucket",
+        "s3_prefix": "",
+        "s3_endpoint_url": "https://s3.internal",
     }
 
 
@@ -39,6 +43,10 @@ class TestSensitiveKeysNeverOverridden:
             ("embedding_base_url", "https://attacker.example"),
             ("embedding_api_key", "sk-stolen"),
             ("folder_path", "/etc"),
+            ("source_backend", "s3"),
+            ("s3_bucket", "attacker-bucket"),
+            ("s3_prefix", "secrets/"),
+            ("s3_endpoint_url", "https://attacker.example"),
             ("vlm_api_url", "https://attacker.example"),
             ("vlm_api_headers", {"Authorization": "Bearer stolen"}),
         ],

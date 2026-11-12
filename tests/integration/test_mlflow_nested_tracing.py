@@ -14,13 +14,12 @@ mocking MLflow would hide exactly the failure mode being tested for:
   span, their supposedly-independent per-document root spans used to
   collapse into a single trace instead of one trace per document.
 
-Must be run on its own (e.g. ``pytest tests/integration/test_mlflow_nested_tracing.py``),
-not combined with tests/unit in one pytest invocation: document_pipeline.py's
-``enable_tracing`` flag is read from ``ENABLE_TRACING`` once at import time, and
-``src/graph/__init__.py`` eagerly imports it -- so if any other collected test
-file imports anything under ``src.graph`` first, tracing stays disabled here
-no matter what this file sets the env var to. Same constraint as every other
-tracing-dependent module (see AGENTS.md's MLflow Tracing section).
+Tracing-dependent modules read ``ENABLE_TRACING`` once at import time (see
+AGENTS.md's MLflow Tracing section), and ``src/graph/__init__.py`` eagerly
+imports them -- so when another collected test file imports anything under
+``src.graph`` first, tracing would stay disabled here no matter what this file
+sets the env var to. The autouse ``tracing_enabled`` fixture switches those
+module-level flags on per test, so this file also runs combined with tests/unit.
 """
 
 import json
@@ -33,6 +32,19 @@ os.environ["ENABLE_TRACING"] = "1"
 
 from src.graph.document_pipeline import document_workflow  # noqa: E402
 import src.graph.document_pipeline as document_pipeline_mod  # noqa: E402
+import src.graph.document_paths as document_paths_mod  # noqa: E402
+import src.graph.vector_store as vector_store_mod  # noqa: E402
+
+# Modules whose ``enable_tracing`` flag is frozen at import time.
+_TRACED_MODULES = (document_pipeline_mod, document_paths_mod, vector_store_mod)
+
+
+@pytest.fixture(autouse=True)
+def tracing_enabled(monkeypatch):
+    """Enable tracing even if the modules were imported before ENABLE_TRACING=1."""
+    for mod in _TRACED_MODULES:
+        monkeypatch.setattr(mod, "enable_tracing", True)
+        monkeypatch.setattr(mod, "_ml", mlflow, raising=False)
 
 
 def _fake_embed_texts(texts, model, base_url, api_key, dimensions, run_id=None, parent_span=None):
