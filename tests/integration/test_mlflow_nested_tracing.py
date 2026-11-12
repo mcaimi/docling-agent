@@ -23,6 +23,7 @@ no matter what this file sets the env var to. Same constraint as every other
 tracing-dependent module (see AGENTS.md's MLflow Tracing section).
 """
 
+import json
 import os
 
 import mlflow
@@ -203,3 +204,126 @@ class TestErrorPathSpanClosure:
         assert chunk["status"]["code"] == "STATUS_CODE_ERROR"
         # no embed_doc/store_doc spans -- the document's journey ended at chunk_doc
         assert not any(s["name"] == "embed_doc" for s in spans)
+
+
+class TestRunStatusDuringPipeline:
+    def test_run_stays_running_until_owner_ends_it(self, sample_markdown, mlflow_sqlite_backend):
+        """Regression test: run_context() used to re-enter the run with
+        ``with mlflow.start_run(run_id=...)``, whose exit calls end_run() --
+        marking the run FINISHED on the server as soon as the first worker
+        task returned, while the pipeline was still running.
+        """
+        client = mlflow.MlflowClient()
+        with mlflow.start_run() as run:
+            _run_document_workflow(sample_markdown, max_concurrency=3, run_id=run.info.run_id)
+            assert client.get_run(run.info.run_id).info.status == "RUNNING"
+            # the owning thread still has its run active
+            assert mlflow.active_run().info.run_id == run.info.run_id
+
+        assert client.get_run(run.info.run_id).info.status == "FINISHED"
+
+
+class TestShardChildRun:
+    def test_shard_logs_child_run_progress_and_session_traces(self, sample_markdown, mlflow_sqlite_backend):
+        """A UI-launched shard: nested child of a scheduler-created parent run,
+        live step metrics, run summary, and per-document traces grouped under
+        the parent's session."""
+        from src.docling_agent import process_documents
+        from src.setup.agent_settings import _get_settings_from_environment
+
+        client = mlflow.MlflowClient()
+        exp = mlflow.get_experiment_by_name(mlflow_sqlite_backend)
+        # the scheduler creates the parent without making it active anywhere
+        parent = client.create_run(exp.experiment_id, run_name="logical-run")
+        parent_id = parent.info.run_id
+
+        settings = {
+            **_get_settings_from_environment(),
+            "folder_path": str(sample_markdown),
+            "chunk_size": 100,
+            "chunk_overlap": 10,
+            "embedding_api_key": "sk-fake",
+            "max_concurrency": 1,
+            "shard_index": 0,
+            "shard_count": 2,
+            "mlflow_tracking_uri": mlflow.get_tracking_uri(),
+            "mlflow_experiment_name": mlflow_sqlite_backend,
+            "mlflow_parent_run_id": parent_id,
+            "mlflow_session_id": None,
+            "scheduler_run_id": "sched-1",
+            "scheduler_executor": "podman",
+        }
+        result = process_documents(settings, enable_tracing=True)
+
+        child_id = result["mlflow_run_id"]
+        child = client.get_run(child_id)
+        assert child.info.status == "FINISHED"
+        assert child.data.tags["mlflow.parentRunId"] == parent_id
+        assert child.data.tags["shard_index"] == "0"
+        assert child.data.tags["shard_count"] == "2"
+        assert child.data.tags["scheduler_run_id"] == "sched-1"
+        assert child.data.tags["total_document_count"] == "3"
+        assert result["mlflow_session_id"] == parent_id  # defaults to the parent
+        # the shard must not touch the parent's lifecycle
+        assert client.get_run(parent_id).info.status == "RUNNING"
+
+        # shard 0 of 2 over 3 sorted docs -> doc0, doc2; one batch each
+        history = client.get_metric_history(child_id, "docs_completed")
+        assert [(m.step, m.value) for m in history] == [(1, 1), (2, 2)]
+        assert child.data.metrics["document_count"] == 2
+        assert child.data.metrics["total_chunks"] == len(result["documents"])
+
+        artifacts = {a.path for a in client.list_artifacts(child_id)}
+        assert "run_summary.json" in artifacts
+        summary = mlflow.artifacts.load_dict(f"runs:/{child_id}/run_summary.json")
+        assert summary["status"] == "completed"
+        assert summary["document_count"] == 2
+
+        mlflow.flush_trace_async_logging()
+        traces = mlflow.search_traces(
+            locations=[exp.experiment_id],
+            filter_string=f"metadata.`mlflow.trace.session` = '{parent_id}'",
+        )
+        roots = [
+            next(s for s in row["spans"] if s["name"] == "document_pipeline")
+            for _, row in traces.iterrows()
+            if any(s["name"] == "document_pipeline" for s in row["spans"])
+        ]
+        # span attributes come back JSON-encoded in the search_traces frame
+        attrs = [{k: json.loads(v) for k, v in r["attributes"].items()} for r in roots]
+        assert sorted(a["file"] for a in attrs) == ["doc0.md", "doc2.md"]
+        for a in attrs:
+            assert a["shard_index"] == 0
+            assert a["file_format"] == ".md"
+            assert a["chunk_count"] > 0
+            assert a["stored_count"] == 0
+
+
+class TestConvertSpanTiming:
+    def test_convert_span_covers_conversion(self, sample_markdown, mlflow_sqlite_backend, monkeypatch):
+        """Regression test: the document and convert_pdf spans used to start
+        after converter.convert() returned, so conversion time was missing
+        from the trace (convert_pdf always ~0 ms)."""
+        import time as _time
+
+        real_new_converter = document_pipeline_mod._new_converter
+
+        class SlowConverter:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def convert(self, path):
+                _time.sleep(0.25)
+                return self.inner.convert(path)
+
+        monkeypatch.setattr(
+            document_pipeline_mod, "_new_converter", lambda **kw: SlowConverter(real_new_converter(**kw))
+        )
+        with mlflow.start_run() as run:
+            _run_document_workflow(sample_markdown, max_concurrency=1, run_id=run.info.run_id)
+
+        for row in _pipeline_traces(mlflow_sqlite_backend):
+            convert = next(s for s in row["spans"] if s["name"] == "convert_pdf")
+            root = next(s for s in row["spans"] if s["name"] == "document_pipeline")
+            assert (int(convert["end_time_unix_nano"]) - int(convert["start_time_unix_nano"])) >= 250_000_000
+            assert int(root["start_time_unix_nano"]) <= int(convert["start_time_unix_nano"])
