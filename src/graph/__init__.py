@@ -4,7 +4,7 @@
 # import the graph state
 try:
     from .prompt_extraction import extract_config_from_prompt, merge_overrides
-    from .document_paths import list_document_paths, shard_paths
+    from .document_paths import discover_document_paths, list_document_paths, shard_paths
     from .document_pipeline import (
         document_workflow,
         convert_doc,
@@ -23,6 +23,7 @@ __all__ = [
     "embed_doc",
     "store_doc",
     "list_document_paths",
+    "discover_document_paths",
     "shard_paths",
     "extract_config_from_prompt",
     "merge_overrides",

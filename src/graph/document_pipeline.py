@@ -3,6 +3,7 @@
 
 import logging
 import os
+import tempfile
 import time
 from typing import Any, Literal
 
@@ -24,6 +25,7 @@ except ImportError as e:
 try:
     from .chunking import chunk_document_records, chunk_document_records_hybrid
     from .embeddings import embed_texts
+    from .s3_source import download_s3_object, is_s3_uri
     from .vector_store import get_vector_store, store_chunk_embeddings
     from ..utils.mlflow_tracing import (
         session_context,
@@ -158,7 +160,8 @@ def convert_doc(
     Parameters
     ----------
     item : {"file_path": str, "config": dict} or {"pdf_path": str, "config": dict}
-        Contains the file path and agent config.
+        Contains the file path (local path or ``s3://bucket/key`` URI, which
+        is downloaded to a temporary directory first) and agent config.
 
     Returns
     -------
@@ -214,7 +217,20 @@ def convert_doc(
                 vlm_preset=config.get("vlm_preset"),
             )
 
-            result = converter.convert(file_path)
+            if is_s3_uri(file_path):
+                # Convert a local copy, but keep the s3:// URI as the record's
+                # file_path so vector IDs and error reports name the object.
+                with tempfile.TemporaryDirectory(prefix="docling-s3-") as tmp:
+                    fetch_span = start_child_span(run_id, doc_span, "fetch_s3")
+                    try:
+                        local_path = download_s3_object(file_path, tmp, config)
+                    except Exception as e:
+                        end_span(fetch_span, error=str(e))
+                        raise
+                    end_span(fetch_span, file=file_name)
+                    result = converter.convert(local_path)
+            else:
+                result = converter.convert(file_path)
             doc = _result_to_record(file_path, result, pipeline)
             end_span(
                 convert_span,

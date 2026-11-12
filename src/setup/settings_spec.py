@@ -67,6 +67,8 @@ _TRACING = {"enable_tracing": ("1",)}
 _CHROMA = {"vector_store_backend": ("chroma",)}
 _MILVUS = {"vector_store_backend": ("milvus",)}
 _STORE = {"vector_store_backend": ("chroma", "milvus")}
+_LOCAL = {"source_backend": ("local",)}
+_S3 = {"source_backend": ("s3",)}
 
 _S = SettingSpec
 
@@ -82,8 +84,37 @@ SETTINGS_SPEC: tuple[SettingSpec, ...] = (
     _S("api_key", "API_KEY", "str", "your-api-key-here", "llm",
        "API key of the extraction LLM", sensitive=True),
     # --- source documents ---
+    _S("source_backend", "SOURCE_BACKEND", "str", "local", "source",
+       "Where documents are read from", choices=("local", "s3")),
     _S("folder_path", "FOLDER_PATH", "str", "./pdfs", "source",
-       "Folder scanned for supported documents"),
+       "Folder scanned for supported documents", depends_on=_LOCAL),
+    _S("s3_bucket", "S3_BUCKET", "str", None, "source",
+       "S3 bucket holding the documents", depends_on=_S3),
+    _S("s3_prefix", "S3_PREFIX", "str", "", "source",
+       "Key prefix (folder) scanned inside the bucket", depends_on=_S3),
+    _S("s3_recursive", "S3_RECURSIVE", "bool", 0, "source",
+       "Also scan keys below nested prefixes (local folders are never recursed)", depends_on=_S3),
+    # Unset = AWS; set for S3-compatible stores (MinIO, Ceph/ODF, ...).
+    _S("s3_endpoint_url", "S3_ENDPOINT_URL", "str", None, "source",
+       "S3 endpoint URL (unset = AWS)", depends_on=_S3),
+    _S("s3_region", "S3_REGION", "str", None, "source",
+       "S3 region", env_fallbacks=("AWS_REGION", "AWS_DEFAULT_REGION"), depends_on=_S3),
+    # Unset credentials fall through to boto3's default chain (pod identity,
+    # instance profile, ~/.aws).
+    _S("s3_access_key_id", "S3_ACCESS_KEY_ID", "str", None, "source",
+       "S3 access key id", sensitive=True, env_fallbacks=("AWS_ACCESS_KEY_ID",), depends_on=_S3),
+    _S("s3_secret_access_key", "S3_SECRET_ACCESS_KEY", "str", None, "source",
+       "S3 secret access key", sensitive=True, env_fallbacks=("AWS_SECRET_ACCESS_KEY",),
+       depends_on=_S3),
+    _S("s3_session_token", "S3_SESSION_TOKEN", "str", None, "source",
+       "S3 session token", sensitive=True, env_fallbacks=("AWS_SESSION_TOKEN",), depends_on=_S3),
+    _S("s3_addressing_style", "S3_ADDRESSING_STYLE", "str", "auto", "source",
+       "Bucket addressing style (MinIO usually needs path)", choices=("auto", "path", "virtual"),
+       depends_on=_S3),
+    _S("s3_verify_ssl", "S3_VERIFY_SSL", "bool", 1, "source",
+       "Verify the S3 endpoint's TLS certificate", depends_on=_S3),
+    _S("s3_ca_bundle", "S3_CA_BUNDLE", "str", None, "source",
+       "CA bundle used to verify the S3 endpoint", depends_on=_S3),
     _S("shard_index", "SHARD_INDEX", "int", 0, "source",
        "Zero-based shard processed by this instance", env_fallbacks=("JOB_COMPLETION_INDEX",)),
     _S("shard_count", "SHARD_COUNT", "int", 1, "source",

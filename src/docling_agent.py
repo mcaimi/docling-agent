@@ -18,12 +18,12 @@ except ImportError as e:
 
 try:
     from .graph import (
+        discover_document_paths,
         extract_config_from_prompt,
-        list_document_paths,
         merge_overrides,
         shard_paths,
     )
-    from .graph.document_paths import DOCUMENT_GLOBS
+    from .graph.document_paths import DOCUMENT_GLOBS, validate_source_settings
     from .graph.document_pipeline import document_workflow, progress_metrics
 except ImportError as e:
     raise ImportError(f"Failed to import required modules: {e}") from e
@@ -116,11 +116,11 @@ def _aggregate_pipeline_results(
 
 
 def _discover_paths(agent_settings: dict[str, Any]) -> tuple[list[str], int]:
-    """List documents in folder_path and keep this instance's shard.
+    """List documents from the configured source and keep this instance's shard.
 
     Returns ``(shard_paths, total_document_count)``.
     """
-    paths = list_document_paths(agent_settings.get("folder_path"))
+    paths = discover_document_paths(agent_settings)
     shard_index = int(agent_settings.get("shard_index") or 0)
     shard_count = int(agent_settings.get("shard_count") or 1)
     selected = shard_paths(paths, shard_index, shard_count)
@@ -362,8 +362,10 @@ def main() -> int:
         logger.info(" -> MLflow experiment name: %s", agent_settings.get("mlflow_experiment_name"))
 
     try:
-        # fail fast on a bad shard assignment, before any MLflow run exists
+        # fail fast on a bad shard assignment or document source, before any
+        # MLflow run exists
         shard_paths([], int(agent_settings["shard_index"]), int(agent_settings["shard_count"]))
+        validate_source_settings(agent_settings)
     except ValueError as e:
         logger.error("Invalid configuration: %s", e)
         return EXIT_CONFIG_ERROR

@@ -1,9 +1,12 @@
 #!/usr/bin/env python
-"""Filesystem helpers for discovering processable documents."""
+"""Helpers for discovering processable documents on a filesystem or in S3."""
 
 import logging
 from pathlib import Path
+from typing import Any
 import os
+
+from .s3_source import S3_SCHEME, require_boto3, list_s3_document_paths
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +44,56 @@ def list_document_paths(folder_path: str | Path) -> list[str]:
     return paths
 
 
+# reject an unusable source configuration before any work starts
+def validate_source_settings(settings: dict[str, Any]) -> None:
+    """Raise ``ValueError`` for an unknown backend, or S3 without bucket or boto3."""
+    backend = (settings.get("source_backend") or "local").lower()
+    if backend == "local":
+        return
+    if backend != "s3":
+        raise ValueError(f"unsupported source_backend: {backend!r}")
+    if not settings.get("s3_bucket"):
+        raise ValueError("SOURCE_BACKEND=s3 requires S3_BUCKET")
+    require_boto3()
+
+
+# list supported documents from the configured source backend
+def discover_document_paths(settings: dict[str, Any]) -> list[str]:
+    """Return sorted document paths for ``settings["source_backend"]``.
+
+    ``local`` (default) globs ``folder_path`` non-recursively; ``s3`` lists
+    ``s3_bucket``/``s3_prefix`` (recursively with ``s3_recursive``) and returns
+    ``s3://bucket/key`` URIs.
+    """
+    validate_source_settings(settings)
+    if (settings.get("source_backend") or "local").lower() == "local":
+        return list_document_paths(settings.get("folder_path"))
+
+    bucket = settings.get("s3_bucket")
+    prefix = settings.get("s3_prefix") or ""
+    paths = list_s3_document_paths(
+        bucket,
+        prefix,
+        settings,
+        DOCUMENT_GLOBS,
+        recursive=bool(settings.get("s3_recursive")),
+    )
+
+    if enable_tracing:
+        with _ml.start_span("list_documents"):
+            _ml.set_tag("folder", f"{S3_SCHEME}{bucket}/{prefix}")
+            _ml.set_tag("document_count", len(paths))
+
+    return paths
+
+
 # select this instance's share of the documents
 def shard_paths(paths: list[str], shard_index: int, shard_count: int) -> list[str]:
     """Return every ``shard_count``-th path starting at ``shard_index``.
 
     Deterministic and non-overlapping across ``shard_index in range(shard_count)``
     as long as every shard sees the same ``paths`` in the same order
-    (``list_document_paths`` sorts), so parallel instances (e.g. pods of a
+    (``list_document_paths``/``discover_document_paths`` sort), so parallel instances (e.g. pods of a
     Kubernetes Indexed Job) split the work without a coordinator.
     """
     if shard_count < 1:
@@ -59,4 +105,5 @@ def shard_paths(paths: list[str], shard_index: int, shard_count: int) -> list[st
     return paths[shard_index::shard_count]
 
 # export the functions
-__all__ = ["DOCUMENT_GLOBS", "list_document_paths", "shard_paths"]
+__all__ = ["DOCUMENT_GLOBS", "list_document_paths", "discover_document_paths",
+           "validate_source_settings", "shard_paths"]
