@@ -11,13 +11,13 @@ Config is a plain dict throughout — no `PDFProcessorState` TypedDict or compil
 
 ## Workflow
 
-1. **Extract config** (`src/graph/prompt_extraction.py`): If `user_prompt` is set, an LLM extracts overrides via `extract_config_from_prompt`; non-`None` values are applied via `merge_overrides`. Unextractable keys keep `.env` defaults. Keys in `src/graph/prompts/extractor.py`'s `_SENSITIVE_KEYS` (`folder_path`, `base_url`, `api_key`, `embedding_base_url`, `embedding_api_key`, `vlm_api_url`, `vlm_api_headers`) — plus `vlm_api_params` and vector DB secrets — are never extracted from free-text `user_prompt`: they're excluded from the extraction system prompt, and `extract_config_from_prompt`/`merge_overrides` force them to stay unset even if a model response or caller-supplied overrides dict includes them. This boundary exists because `user_prompt` is treated as untrusted input — allowing it to set network endpoints, credentials, or filesystem paths would let a crafted prompt redirect embedding/VLM traffic or read arbitrary directories.
-2. **Load documents** (`src/graph/document_paths.py`): `list_document_paths(folder_path)` globs for `*.pdf`, `*.docx`, `*.xlsx`, `*.md`, `*.html`, `*.latex`, `*.tex` (sorted); `shard_paths(paths, shard_index, shard_count)` keeps `paths[shard_index::shard_count]` so parallel instances (e.g. Kubernetes Indexed Job pods) split the work without a coordinator. Both run via `_discover_paths` in `src/docling_agent.py`.
+1. **Extract config** (`src/graph/prompt_extraction.py`): If `user_prompt` is set, an LLM extracts overrides via `extract_config_from_prompt`; non-`None` values are applied via `merge_overrides`. Unextractable keys keep `.env` defaults. Keys in `src/graph/prompts/extractor.py`'s `_SENSITIVE_KEYS` (`folder_path`, `source_backend`, `s3_bucket`, `s3_prefix`, `s3_endpoint_url`, `base_url`, `api_key`, `embedding_base_url`, `embedding_api_key`, `vlm_api_url`, `vlm_api_headers`) — plus `vlm_api_params` and vector DB secrets — are never extracted from free-text `user_prompt`: they're excluded from the extraction system prompt, and `extract_config_from_prompt`/`merge_overrides` force them to stay unset even if a model response or caller-supplied overrides dict includes them. This boundary exists because `user_prompt` is treated as untrusted input — allowing it to set network endpoints, credentials, or filesystem paths would let a crafted prompt redirect embedding/VLM traffic or read arbitrary directories.
+2. **Load documents** (`src/graph/document_paths.py`): `discover_document_paths(settings)` dispatches on `source_backend`. `local` → `list_document_paths(folder_path)` globs (non-recursively) for `*.pdf`, `*.docx`, `*.xlsx`, `*.md`, `*.html`, `*.latex`, `*.tex` (sorted). `s3` → `list_s3_document_paths` (`src/graph/s3_source.py`) lists `s3_bucket`/`s3_prefix` with the same `DOCUMENT_GLOBS` on the key basename, non-recursively unless `s3_recursive`, and returns sorted `s3://bucket/key` URIs. `validate_source_settings` rejects an unknown backend, or `s3` without a bucket or without boto3 (CLI exit `2`); `shard_paths(paths, shard_index, shard_count)` keeps `paths[shard_index::shard_count]` so parallel instances (e.g. Kubernetes Indexed Job pods) split the work without a coordinator. Both run via `_discover_paths` in `src/docling_agent.py`.
 3. **Batched pipeline** (`src/graph/document_pipeline.py`): `for start in range(0, len(input_data), max_conc)` — each batch processes up to `max_conc` documents through these stages in parallel:
 
    | Stage | Function | Notes |
    |-------|----------|-------|
-   | Convert | `convert_doc` | Fresh `DocumentConverter` per task via `_new_converter`. Standard handles all formats; VLM (`_effective_pipeline fallback to standard) applies to PDF only. Output record: `content` (markdown), `docling_document`, `metadata`. Errors → `doc: None` + `error` string. |
+   | Convert | `convert_doc` | Fresh `DocumentConverter` per task via `_new_converter`. `s3://` paths are downloaded (`download_s3_object`, `fetch_s3` span) into a per-task temp dir keeping the basename, converted, then deleted; the record keeps the `s3://` URI as `file_path`, so vector IDs and `error_reports` name the object. Standard handles all formats; VLM (`_effective_pipeline fallback to standard) applies to PDF only. Output record: `content` (markdown), `docling_document`, `metadata`. Errors → `doc: None` + `error` string. |
    | Chunk | `chunk_doc` | `fixed` → chunks markdown `content` by `chunk_size`/`chunk_overlap`. `hybrid` → uses `docling_document` + `HybridChunker.contextualize`. Metadata extended with `chunk_index`, `chunk_count`. |
    | Embed | `embed_doc` | One embedding per chunk via `embed_texts`. Transient API errors (rate limits, timeouts, connection issues, 5xx) are retried with backoff; a batch that still fails afterward → `None` at those indices plus a non-blocking `embedding_error` note on the document record. |
    | Store | `store_doc` | Writes precomputed vectors to `chroma`/`milvus` via cached connections. Supports write modes: `insert` (default), `upsert` (delete+insert), `skip_existing`. Features: parallel batch processing, retry with exponential backoff, circuit breaker for failures, connection pooling. Skips `None` embeddings. IDs: `{file_path}#chunk_{chunk_index}`. No-op when backend is `none`. |
@@ -59,7 +59,8 @@ Config is a plain dict throughout — no `PDFProcessorState` TypedDict or compil
 | `src/graph/embeddings.py` | `embed_texts`, `embed_single_text`, singleton `get_embedding_client` with connection pooling |
 | `src/graph/prompt_extraction.py` | `extract_config_from_prompt`, `merge_overrides` |
 | `src/graph/prompts/extractor.py` | System prompt; NLP-extractable keys in `_CONFIG_KEYS` |
-| `src/graph/document_paths.py` | `DOCUMENT_GLOBS`, `list_document_paths`, `shard_paths` |
+| `src/graph/document_paths.py` | `DOCUMENT_GLOBS`, `list_document_paths`, `discover_document_paths`, `validate_source_settings`, `shard_paths` |
+| `src/graph/s3_source.py` | `is_s3_uri`, `parse_s3_uri`, cached thread-safe `get_s3_client`, `list_s3_document_paths`, `download_s3_object`; boto3 imported lazily (`s3` extra) |
 | `src/setup/settings_spec.py` | `SETTINGS_SPEC` — single source of truth for every setting (env var, type, default, group, `choices`, `sensitive`, `untrusted`, `env_fallbacks`, `depends_on`); `SENSITIVE_SETTING_KEYS`; `settings_contract()` — the JSON contract for launchers. No third-party imports. |
 | `src/setup/agent_settings.py` | `load_environment_variables(envfile=None)` — optional `.env` loading, then env→config via `SETTINGS_SPEC` |
 | `src/utils/json_parse.py` | `_parse_json_object_str` for VLM headers/params env vars |
@@ -75,7 +76,7 @@ Gated by `ENABLE_TRACING` (env) / `enable_tracing` (config).
 - **CLI path** (`src/docling_agent.py` `__main__`): When `enable_tracing` is truthy → `mlflow.set_tracking_uri`, `mlflow.set_experiment`, `mlflow.openai.autolog()` (`mlflow.langchain.autolog()` only with `MLFLOW_LANGCHAIN_AUTOLOG=1`: it records whole DoclingDocuments in LangGraph task spans, and their uint64 `binary_hash` makes an MLflow server reject the entire trace), unique run name (`_shard{i}` suffix when sharded), session grouping via `session_id = mlflow_session_id or mlflow_parent_run_id or run.info.run_id`. With `mlflow_parent_run_id` set, the run is a nested child of that run (one shard of a scheduler-launched logical run). Tags: `shard_index`, `shard_count`, `total_document_count`, `scheduler_run_id`/`scheduler_executor` when set. Spans: `NLP prompt extraction`, `document discovery`, `Parallel pipeline`, `Results aggregation`. Metrics: `document_count` (this shard), plus per-batch `progress_metrics` with `step=docs_completed` (`docs_completed`, `docs_failed`, `total_chunks`, `total_embeddings`, `non_null_embeddings`, `vectors_stored`, `vectors_upserted`, `vector_store_retry_count`, `failed_chunk_count`, `error_count`, `vector_store_error_count`) — the latest value is the final total. Artifacts: `run_summary.json` always, `error_reports.json` when non-empty. `SENSITIVE_SETTING_KEYS` (plus a credential-name regex) are never logged as params.
 - **Per-document traces**: root `document_pipeline` span per document with attributes `file`, `file_format`, `shard_index`, `chunk_count`, `stored_count`, `embedding_failed`, and `stage_failed` on errors.
 - **Run status**: `run_context` must never end the run (MLflow's `with start_run(run_id=...)` would mark it FINISHED mid-pipeline); the native run status is the source of truth for schedulers.
-- **Task spans**: Workers must have `ENABLE_TRACING=1` in env at **import time** (before loading `graph`/`pipeline` modules). Spans: `convert_pdf`, `chunk_doc`, `embed_doc`, `store_doc` + helpers `chunk_fixed`/`chunk_hybrid`/`embed_texts`/`list_documents`.
+- **Task spans**: Workers must have `ENABLE_TRACING=1` in env at **import time** (before loading `graph`/`pipeline` modules). Spans: `convert_pdf`, `chunk_doc`, `embed_doc`, `store_doc` + helpers `fetch_s3` (S3 source only)/`chunk_fixed`/`chunk_hybrid`/`embed_texts`/`list_documents`.
 - **Session filter**: ``metadata.`mlflow.trace.session` = '<run_id or MLFLOW_SESSION_ID>'``.
 - `process_documents(..., enable_tracing=True)` starts a top-level MLflow run. The config dict key alone does not enable tracing unless the flag is passed.
 
@@ -83,7 +84,7 @@ Gated by `ENABLE_TRACING` (env) / `enable_tracing` (config).
 
 - `python -m src.docling_agent [--envfile PATH] [--user_prompt TEXT] [--print-settings-schema]` — `--envfile` defaults to `./.env` when present; otherwise configuration comes purely from the environment. `--user_prompt` overrides `USER_PROMPT`.
 - Exit codes: `0` completed (even with per-file errors in `error_reports`), `1` fatal error, `2` configuration error (missing env file, invalid JSON setting, shard index out of range).
-- `Containerfile`: multi-stage `uv` build with `--extra vector-stores`, docling models pre-downloaded (`DOCLING_ARTIFACTS_PATH`), non-root, arbitrary-UID friendly; defaults `FOLDER_PATH=/data/in`, `LOG_FORMAT=json`.
+- `Containerfile`: multi-stage `uv` build with `--extra vector-stores --extra s3`, docling models pre-downloaded (`DOCLING_ARTIFACTS_PATH`), non-root, arbitrary-UID friendly; defaults `FOLDER_PATH=/data/in`, `LOG_FORMAT=json`.
 
 ## Settings contract and launchers
 
@@ -96,7 +97,11 @@ This repo hosts only the agent. The scheduler ([docling-scheduler](https://githu
 
 | Env Var | Config Key | Default |
 |---------|------------|---------|
+| `SOURCE_BACKEND` | `source_backend` | local (`local` or `s3`) |
 | `FOLDER_PATH` | `folder_path` | ./pdfs |
+| `S3_BUCKET` / `S3_PREFIX` / `S3_RECURSIVE` | `s3_bucket` / `s3_prefix` / `s3_recursive` | (unset) / (empty) / 0 |
+| `S3_ENDPOINT_URL` / `S3_REGION` / `S3_ADDRESSING_STYLE` | `s3_endpoint_url` / `s3_region` / `s3_addressing_style` | (unset = AWS) / (unset) / auto |
+| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` / `S3_SESSION_TOKEN` | `s3_access_key_id` / ... | (unset) — sensitive; fall back to `AWS_*`, then boto3's default chain |
 | `CONVERSION_PIPELINE` | `conversion_pipeline` | standard |
 | `CHUNKING_STRATEGY` | `chunking_strategy` | fixed |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `chunk_size` / `chunk_overlap` | 1000 / 100 |

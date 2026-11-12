@@ -14,9 +14,11 @@ LangGraph workflow that discovers documents (PDF, DOCX, XLSX, Markdown, HTML, La
    uv sync --extra chroma
    uv sync --extra milvus
    uv sync --extra vector-stores
+   # Optional S3 document source:
+   uv sync --extra s3
    ```
 
-   Install the matching extra before setting `VECTOR_STORE_BACKEND` to `chroma` or `milvus`.
+   Install the matching extra before setting `VECTOR_STORE_BACKEND` to `chroma` or `milvus`, or `SOURCE_BACKEND` to `s3`.
 
 3. **Environment**: Create a `.env` file in the project root (see `.env` for the full list of configurable variables). All settings can also be overridden via shell environment variables.
 
@@ -87,13 +89,39 @@ podman build -t docling-agent -f Containerfile .
 podman run --rm -v ./pdfs:/data/in:ro,Z -e VECTOR_STORE_BACKEND=none docling-agent
 ```
 
+### Reading documents from S3
+
+With `SOURCE_BACKEND=s3`, documents are listed from `S3_BUCKET` under `S3_PREFIX` instead of `FOLDER_PATH`. Works with AWS and S3-compatible stores (MinIO, Ceph/ODF) via `S3_ENDPOINT_URL`:
+
+```bash
+SOURCE_BACKEND=s3 S3_BUCKET=docs S3_PREFIX=incoming/ \
+S3_ENDPOINT_URL=https://s3.example.com S3_ADDRESSING_STYLE=path \
+S3_ACCESS_KEY_ID=... S3_SECRET_ACCESS_KEY=... \
+uv run python -m src.docling_agent
+```
+
+- Listing is non-recursive by default, like the local folder scan; `S3_RECURSIVE=1` also includes keys below nested prefixes. Local folders are never scanned recursively.
+- Documents are identified as `s3://bucket/key` everywhere (chunk metadata `file_path`, vector IDs `s3://bucket/key#chunk_N`, `error_reports`), so re-running with `VECTOR_STORE_WRITE_MODE=upsert` replaces the same records.
+- Credentials: `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` / `S3_SESSION_TOKEN` (falling back to the standard `AWS_*` variables); when unset, boto3's default chain applies (pod identity, instance profile, `~/.aws`). `S3_VERIFY_SSL` / `S3_CA_BUNDLE` control TLS verification.
+- Each worker downloads its current document into a temporary directory (`TMPDIR`, default `/tmp`) and deletes it after conversion: budget about `MAX_CONCURRENCY` × the largest document of scratch space (e.g. an `emptyDir` on `/tmp` with a read-only root filesystem).
+- A document that fails to download is reported in `error_reports` with stage `pipeline`, without affecting the others. An unreachable endpoint, missing bucket, or denied listing is fatal (exit `1`); `SOURCE_BACKEND=s3` without `S3_BUCKET`, or without the `s3` extra installed, is a configuration error (exit `2`).
+- Every shard lists the bucket independently: keep the prefix stable while a sharded run is in progress, or shards may overlap or miss objects.
+
 With `ENABLE_TRACING=1`, the CLI connects to `mlflow_tracking_uri`, uses `mlflow_experiment_name`, and starts a uniquely named run (`docling_pdf_processing_{timestamp}_{uuid}` via `generate_mlflow_run_name`). All traces from that invocation are grouped under one MLflow session (default: the run’s `run_id`; override with `MLFLOW_SESSION_ID`). It logs sanitized config params, workflow spans (NLP extraction, document discovery, pipeline, aggregation), metrics (`document_count`, plus cumulative progress metrics such as `docs_completed`, `total_chunks`, `vectors_stored`, `error_count` logged after every batch with `step=docs_completed`), writes `run_summary.json`, and writes `error_reports.json` when any file fails. With `MLFLOW_PARENT_RUN_ID` set, the run is logged as a nested child of that run and its traces join the parent's session. When a vector store backend is configured, the CLI also prints `Vectors stored in {backend}: N`. Per-document tasks also emit spans when `ENABLE_TRACING` is set in the environment before worker modules load.
 
 ## Environment Variables
 
 | Variable | Default | Role |
 |---|---|---|
+| `SOURCE_BACKEND` | `local` | `local` (scan `FOLDER_PATH`) or `s3` (list `S3_BUCKET`/`S3_PREFIX`) |
 | `FOLDER_PATH` | `./pdfs` | Directory containing documents to process |
+| `S3_BUCKET` / `S3_PREFIX` | (unset) / (empty) | Bucket and key prefix to read documents from |
+| `S3_RECURSIVE` | `0` | Also list keys below nested prefixes (S3 only) |
+| `S3_ENDPOINT_URL` | (unset = AWS) | Endpoint of an S3-compatible store |
+| `S3_REGION` | (unset) | Region (falls back to `AWS_REGION`, `AWS_DEFAULT_REGION`) |
+| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` / `S3_SESSION_TOKEN` | (unset) | Credentials (fall back to `AWS_*`, then boto3's default chain) |
+| `S3_ADDRESSING_STYLE` | `auto` | `auto`, `path` (usually needed for MinIO) or `virtual` |
+| `S3_VERIFY_SSL` / `S3_CA_BUNDLE` | `1` / (unset) | TLS verification of the S3 endpoint |
 | `EMBEDDING_API_KEY` | `your-api-key-here` | API key for the embedding endpoint |
 | `EMBEDDING_BASE_URL` | `https://api.openai.com/v1` | Base URL of the OpenAI-compatible API |
 | `EMBEDDING_MODEL` | `text-embedding-ada-002` | Model id passed to the embeddings API |
@@ -266,7 +294,7 @@ replace_document_chunks(
 | `standard` | PDF, DOCX, XLSX, Markdown (`.md`), HTML, LaTeX (`.latex`, `.tex`) |
 | `vlm` | PDF only (non-PDF files fall back to the standard pipeline) |
 
-Discovery globs in `list_document_paths` match the standard pipeline set above.
+Discovery globs (`DOCUMENT_GLOBS`, used for both local folders and S3 keys) match the standard pipeline set above.
 
 ## Launchers: scheduler and web UI
 
@@ -317,7 +345,7 @@ flowchart TB
 ## Workflow
 
 1. **Extract config** (optional): If a `user_prompt` is provided (via CLI `--user_prompt` or the `user_prompt` config field), an LLM extracts configuration overrides. Unextractable parameters keep their `.env` defaults.
-2. **Load documents**: Discover supported files in `FOLDER_PATH` via `list_document_paths`.
+2. **Load documents**: Discover supported files in `FOLDER_PATH`, or in `S3_BUCKET`/`S3_PREFIX` with `SOURCE_BACKEND=s3`, via `discover_document_paths`.
 3. **Process in batches**: Documents are handled in groups of up to `MAX_CONCURRENCY`. Within each batch, convert → chunk → embed → store run in parallel for every file in that batch; the next batch starts when the current one finishes. The store step is skipped when `vector_store_backend` is `none`. Conversion supports `standard` (multi-format) or `vlm` (PDF only); chunking supports `fixed` (character-based with `CHUNK_SIZE`/`CHUNK_OVERLAP`) or `hybrid` (docling `HybridChunker`).
 4. **Aggregate results**: All chunks and embeddings are merged into `documents` and `embeddings`, with `vectors_stored` summing successful writes. Per-file failures are collected in `error_reports` with `stage` of `pipeline` or `vector_store`, without stopping other files. The returned dict also includes the resolved agent settings (e.g. `folder_path`, `chunking_strategy`) except `documents` and `embeddings`.
 
@@ -360,7 +388,7 @@ Comprehensive test suite with unit and integration tests:
 uv run pytest tests/unit/ -v
 ```
 
-Tracing-dependent integration tests read `ENABLE_TRACING` at import time, so run each of them in its own pytest invocation:
+The MLflow tracing integration tests use a local sqlite backend and need no services. They can run on their own or together with the rest of the suite (`uv run pytest tests`):
 
 ```bash
 uv run pytest tests/integration/test_mlflow_nested_tracing.py
