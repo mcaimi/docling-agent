@@ -74,9 +74,20 @@ uv run python -m src.docling_agent
 uv run python -m src.docling_agent --envfile .env.local
 # User prompt for NLP extraction:
 uv run python -m src.docling_agent --user_prompt "Use VLM pipeline and hybrid chunking"
+# Process only shard 0 of 4 (sorted file list, every 4th file):
+SHARD_INDEX=0 SHARD_COUNT=4 uv run python -m src.docling_agent
 ```
 
-With `ENABLE_TRACING=1`, the CLI connects to `mlflow_tracking_uri`, uses `mlflow_experiment_name`, and starts a uniquely named run (`docling_pdf_processing_{timestamp}_{uuid}` via `generate_mlflow_run_name`). All traces from that invocation are grouped under one MLflow session (default: the run’s `run_id`; override with `MLFLOW_SESSION_ID`). It logs sanitized config params, workflow spans (NLP extraction, document discovery, pipeline, aggregation), metrics (`document_count`, `total_chunks`, `total_embeddings`, `vectors_stored`, `error_count`, `vector_store_error_count`, `non_null_embeddings`), and writes `error_reports.json` when any file fails. When a vector store backend is configured, the CLI also prints `Vectors stored in {backend}: N`. Per-document tasks also emit spans when `ENABLE_TRACING` is set in the environment before worker modules load.
+The `.env` file is optional: without it, every setting is read from environment variables (the full list, with defaults, is in `src/setup/settings_spec.py`). `LOG_FORMAT=json` switches to JSON-lines logs. Exit codes: `0` completed (per-file failures are reported, not fatal), `1` fatal error, `2` configuration error.
+
+Container (configuration via environment only):
+
+```bash
+podman build -t docling-agent -f Containerfile .
+podman run --rm -v ./pdfs:/data/in:ro,Z -e VECTOR_STORE_BACKEND=none docling-agent
+```
+
+With `ENABLE_TRACING=1`, the CLI connects to `mlflow_tracking_uri`, uses `mlflow_experiment_name`, and starts a uniquely named run (`docling_pdf_processing_{timestamp}_{uuid}` via `generate_mlflow_run_name`). All traces from that invocation are grouped under one MLflow session (default: the run’s `run_id`; override with `MLFLOW_SESSION_ID`). It logs sanitized config params, workflow spans (NLP extraction, document discovery, pipeline, aggregation), metrics (`document_count`, plus cumulative progress metrics such as `docs_completed`, `total_chunks`, `vectors_stored`, `error_count` logged after every batch with `step=docs_completed`), writes `run_summary.json`, and writes `error_reports.json` when any file fails. With `MLFLOW_PARENT_RUN_ID` set, the run is logged as a nested child of that run and its traces join the parent's session. When a vector store backend is configured, the CLI also prints `Vectors stored in {backend}: N`. Per-document tasks also emit spans when `ENABLE_TRACING` is set in the environment before worker modules load.
 
 ## Environment Variables
 
@@ -257,6 +268,28 @@ replace_document_chunks(
 
 Discovery globs in `list_document_paths` match the standard pipeline set above.
 
+## Launchers: scheduler and web UI
+
+This repository hosts only the agent. Runs can be launched and monitored from two separate projects:
+
+- [docling-scheduler](https://github.com/mcaimi/docling-scheduler): a local API that starts one Podman container per shard from the agent image and monitors the runs through MLflow and the container runtime.
+- [docling-ui](https://github.com/mcaimi/docling-ui): the scheduler's web UI.
+
+They don't import agent code. The agent's interface to them is:
+
+- **Image**: built from `Containerfile`; configured purely through environment variables.
+- **Settings contract**: `settings-schema.json`, generated from `src/setup/settings_spec.py` (env var, type, default, `sensitive`, `choices`, `depends_on`, and the document globs). Sensitive defaults are never included. Launchers vendor a copy. After changing a setting, regenerate it and refresh the scheduler's copy:
+
+  ```bash
+  uv run python -m src.docling_agent --print-settings-schema > settings-schema.json
+  cp settings-schema.json ../docling-scheduler/src/docling_scheduler/settings-schema.json
+  ```
+
+  `tests/unit/test_settings_contract.py` fails while the committed file is stale.
+- **Sharding**: `SHARD_INDEX` / `SHARD_COUNT`.
+- **MLflow**: with `MLFLOW_PARENT_RUN_ID`, each shard is a nested child run tagged with `shard_index`, `shard_count`, `total_document_count`, `scheduler_run_id` and `scheduler_executor`. Per-batch progress metrics use `step = docs_completed`, plus per-document traces and the `run_summary.json` / `error_reports.json` artifacts (see [AGENTS.md](AGENTS.md)).
+- **Exit codes**: `0` completed (per-file errors included), `1` fatal, `2` configuration error.
+
 ## Architecture
 
 Agent and contributor details: see [AGENTS.md](AGENTS.md).
@@ -310,10 +343,12 @@ Configure the tracking server and experiment via `MLFLOW_TRACKING_URI` and `MLFL
 - `src/graph/chunking.py` — fixed-size and hybrid chunking
 - `src/graph/embeddings.py` — OpenAI-compatible embedding client with connection pooling
 - `src/graph/prompt_extraction.py` — NLP config extraction from natural language
-- `src/graph/document_paths.py` — document discovery
-- `src/setup/agent_settings.py` — `.env` loading with all configuration options
+- `src/graph/document_paths.py` — document discovery and sharding
+- `src/setup/settings_spec.py` — declarative spec of every setting (env var, type, default, sensitivity); `settings_contract()` for launchers
+- `src/setup/agent_settings.py` — environment / optional `.env` loading driven by the spec
 - `src/utils/uuids.py` — `generate_mlflow_run_name` for unique CLI run names
-- `src/utils/mlflow_tracing.py` — `session_context` for MLflow trace session grouping
+- `src/utils/mlflow_tracing.py` — `session_context` for MLflow trace session grouping, per-document span helpers
+- `src/utils/logging_setup.py` — text / JSON-lines logging
 - `src/utils/circuit_breaker.py` — circuit breaker pattern for resilience
 
 ## Testing
@@ -323,6 +358,12 @@ Comprehensive test suite with unit and integration tests:
 ### Unit Tests
 ```bash
 uv run pytest tests/unit/ -v
+```
+
+Tracing-dependent integration tests read `ENABLE_TRACING` at import time, so run each of them in its own pytest invocation:
+
+```bash
+uv run pytest tests/integration/test_mlflow_nested_tracing.py
 ```
 
 - Circuit breaker pattern (10 tests)
@@ -354,7 +395,7 @@ Declared in `pyproject.toml`:
 
 - `docling>=2.142.1`
 - `httpx2>=2.16.0` (openai>=3's HTTP transport)
-- `langchain>=1.4.7` (MLflow LangChain autolog)
+- `langchain>=1.4.7` (LangGraph runtime; optional MLflow LangChain autolog via `MLFLOW_LANGCHAIN_AUTOLOG=1`)
 - `langgraph>=1.2.16`
 - `mlflow>=3.17.2`
 - `openai>=3.37.0`
@@ -372,6 +413,3 @@ Optional extras:
 
 GPL-3
 
-## AI Disclosure
-
-This project has been developed with the help of an AI Model. Specifically an instance of Qwen3.6-35B-A3B running in vLLM
