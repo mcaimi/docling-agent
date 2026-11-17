@@ -2,6 +2,7 @@
 """MLflow tracing helpers for session-scoped trace grouping and per-document
 nested span trees spanning multiple LangGraph tasks."""
 
+import threading
 from contextlib import contextmanager
 from typing import Any, Generator
 
@@ -38,9 +39,16 @@ def run_context(run_id: str | None) -> Generator[None, None, None]:
 
     Safe to nest: callers at different layers (e.g. a task function and a
     helper it calls) may both wrap their work in ``run_context(run_id)`` for
-    the same id. Re-entering ``mlflow.start_run(run_id=...)`` for a run that's
-    already active in the current context raises ("Run ... is already
-    active"), so this checks first and no-ops if so.
+    the same id. Re-entering a run that's already active in the current
+    context raises ("Run ... is already active"), so this checks first and
+    no-ops if so.
+
+    Must *not* terminate the run on exit: the run is owned by the thread that
+    started it and is still in progress. ``with mlflow.start_run(run_id=...)``
+    calls ``end_run()`` when the block exits, which marks the run FINISHED on
+    the tracking server as soon as the first worker task returns (verified
+    empirically) -- so this attaches the run to the calling thread's
+    active-run stack directly instead (see ``_attach_run``).
     """
     if not run_id:
         yield
@@ -52,8 +60,68 @@ def run_context(run_id: str | None) -> Generator[None, None, None]:
         yield
         return
 
-    with mlflow.start_run(run_id=run_id):
+    with _attach_run(run_id):
         yield
+
+
+_run_cache: dict[str, Any] = {}
+_run_cache_lock = threading.Lock()
+
+
+def _cached_run(run_id: str) -> Any:
+    """Fetch (once per process) the ``Run`` entity for ``run_id``.
+
+    Only ``run.info`` (id, experiment) is used by the active-run stack, which
+    doesn't change over the run's lifetime, so a stale ``run.data`` is fine.
+    """
+    with _run_cache_lock:
+        run = _run_cache.get(run_id)
+    if run is None:
+        from mlflow import MlflowClient
+
+        run = MlflowClient().get_run(run_id)
+        with _run_cache_lock:
+            _run_cache.setdefault(run_id, run)
+    return run
+
+
+@contextmanager
+def _attach_run(run_id: str) -> Generator[None, None, None]:
+    """Make ``run_id`` the active run for the current thread without ending it
+    on exit.
+
+    Pushes onto / pops from MLflow's thread-local active-run stack. That's an
+    internal API (``mlflow.tracking.fluent._active_run_stack``), not part of
+    MLflow's public surface, so this degrades gracefully if a future MLflow
+    version removes or renames it: it falls back to
+    ``mlflow.start_run(run_id=...)`` and restores RUNNING status afterwards
+    (racy, but keeps traces attached to the right run).
+    """
+    try:
+        from mlflow.tracking.fluent import ActiveRun, _active_run_stack
+
+        stack = _active_run_stack.get()
+    except (ImportError, AttributeError):
+        stack = None
+
+    if stack is None:
+        import mlflow
+
+        with mlflow.start_run(run_id=run_id):
+            yield
+        mlflow.MlflowClient().update_run(run_id, status="RUNNING")
+        return
+
+    entry = ActiveRun(_cached_run(run_id))
+    stack.append(entry)
+    try:
+        yield
+    finally:
+        # Remove exactly our entry, even if something nested pushed/popped.
+        for i in range(len(stack) - 1, -1, -1):
+            if stack[i] is entry:
+                del stack[i]
+                break
 
 
 @contextmanager

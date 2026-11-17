@@ -29,13 +29,17 @@ _CONFIG_KEYS = [
 # Keys that control network destinations, credentials, or filesystem access.
 # Free-text user input must never be able to set these -- a crafted prompt
 # could otherwise redirect embedding/VLM traffic to an attacker endpoint,
-# inject outbound headers, or read an arbitrary directory. These are excluded
+# inject outbound headers, or read an arbitrary directory or bucket. These are excluded
 # from the extraction prompt itself and, as a second line of defense, filtered
 # out again in extract_config_from_prompt/merge_overrides even if a model
 # response includes them.
 _SENSITIVE_KEYS = frozenset(
     {
         "folder_path",
+        "source_backend",
+        "s3_bucket",
+        "s3_prefix",
+        "s3_endpoint_url",
         "embedding_api_key",
         "embedding_base_url",
         "api_key",

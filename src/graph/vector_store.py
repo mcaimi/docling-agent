@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """LangChain vector store connectors for persisting precomputed chunk embeddings."""
 
+import logging
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,6 +25,8 @@ try:
 except ImportError as e:
     raise ImportError(f"Failed to import circuit_breaker: {e}") from e
 
+logger = logging.getLogger(__name__)
+
 # check if tracing is enabled
 enable_tracing = int(os.getenv("ENABLE_TRACING", "0")) == 1
 
@@ -31,7 +34,7 @@ if enable_tracing:
     try:
         import mlflow as _ml
     except ImportError:
-        print("MLflow is not installed. Tracing is disabled.")
+        logger.warning("MLflow is not installed. Tracing is disabled.")
         enable_tracing = False
 
 # supported vector store backends
@@ -101,7 +104,7 @@ class QueryEmbeddings(Embeddings):
 
         vectors, errors = embed_texts(texts, self.model, self.base_url, self.api_key, self.dimensions)
         for error in errors:
-            print(f"Query embedding failed: {error}")
+            logger.error("Query embedding failed: %s", error)
         # Filter out None values and return only valid embeddings
         return [v for v in vectors if v is not None]
 
@@ -529,7 +532,7 @@ def store_chunk_embeddings(
                 _delete_ids(vector_store, list(existing_ids))
                 deleted_count = len(existing_ids)
             except Exception as e:
-                print(f"Warning: Failed to delete existing IDs for upsert: {e}")
+                logger.warning("Failed to delete existing IDs for upsert: %s", e)
 
     elif write_mode == "skip_existing":
         existing_ids = _check_ids_exist(vector_store, ids)
@@ -747,7 +750,7 @@ def delete_chunk_embeddings(
                     if results and "ids" in results:
                         ids_to_delete.extend(results["ids"])
                 except Exception as e:
-                    print(f"Warning: Could not retrieve IDs for file {file_path}: {e}")
+                    logger.warning("Could not retrieve IDs for file %s: %s", file_path, e)
 
     if metadata_filters and not file_paths:
         # Query by metadata filters
@@ -757,7 +760,7 @@ def delete_chunk_embeddings(
                 if results and "ids" in results:
                     ids_to_delete.extend(results["ids"])
             except Exception as e:
-                print(f"Warning: Could not retrieve IDs with metadata filters: {e}")
+                logger.warning("Could not retrieve IDs with metadata filters: %s", e)
 
     if not ids_to_delete:
         return {
@@ -881,9 +884,9 @@ def query_vector_store(
             )
 
     except CircuitBreakerError as e:
-        print(f"Query failed: Circuit breaker open: {e}")
+        logger.error("Query failed: Circuit breaker open: %s", e)
     except Exception as e:
-        print(f"Query failed: {e}")
+        logger.error("Query failed: %s", e)
 
     duration_ms = (time.time() - start_time) * 1000
 

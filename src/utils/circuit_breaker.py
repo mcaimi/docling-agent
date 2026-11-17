@@ -1,10 +1,13 @@
 #!/usr/bin/env python
 """Circuit breaker pattern implementation for preventing cascading failures."""
 
+import logging
 import threading
 import time
 from enum import Enum
 from typing import Callable, Any
+
+logger = logging.getLogger(__name__)
 
 
 class CircuitState(Enum):
@@ -92,7 +95,7 @@ class CircuitBreaker:
             if self.state == CircuitState.OPEN:
                 if self._should_attempt_reset():
                     self.state = CircuitState.HALF_OPEN
-                    print(f"Circuit breaker '{self.name}': Attempting recovery (HALF_OPEN)")
+                    logger.info("Circuit breaker %r: Attempting recovery (HALF_OPEN)", self.name)
                 else:
                     raise CircuitBreakerError(
                         f"Circuit breaker '{self.name}' is OPEN. "
@@ -111,16 +114,18 @@ class CircuitBreaker:
 
                 if self.failure_count >= self.failure_threshold or self.state == CircuitState.HALF_OPEN:
                     self.state = CircuitState.OPEN
-                    print(
-                        f"Circuit breaker '{self.name}': OPENED after {self.failure_count} failures. "
-                        f"Timeout: {self.timeout}s"
+                    logger.warning(
+                        "Circuit breaker %r: OPENED after %d failures. Timeout: %ss",
+                        self.name,
+                        self.failure_count,
+                        self.timeout,
                     )
             raise e
         else:
             with self._lock:
                 # Success: reset failure count and close circuit
                 if self.state == CircuitState.HALF_OPEN:
-                    print(f"Circuit breaker '{self.name}': Service recovered (CLOSED)")
+                    logger.info("Circuit breaker %r: Service recovered (CLOSED)", self.name)
 
                 self.failure_count = 0
                 self.state = CircuitState.CLOSED
@@ -134,7 +139,7 @@ class CircuitBreaker:
             self.failure_count = 0
             self.state = CircuitState.CLOSED
             self.last_failure_time = None
-        print(f"Circuit breaker '{self.name}': Manually reset to CLOSED")
+        logger.info("Circuit breaker %r: Manually reset to CLOSED", self.name)
 
     def get_stats(self) -> dict[str, Any]:
         """

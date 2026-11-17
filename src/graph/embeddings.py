@@ -23,10 +23,13 @@ try:
 except ImportError as e:
     raise ImportError(f"tenacity is required: {e}") from e
 
+import logging
 import threading
 from typing import Any
 
 from ..utils.mlflow_tracing import start_child_span, end_span
+
+logger = logging.getLogger(__name__)
 
 # OpenAI embeddings API batch size limit
 # Reference: https://platform.openai.com/docs/api-reference/embeddings
@@ -125,7 +128,7 @@ def _embed_batch(
         return [item.embedding for item in sorted_embeddings], None
     except Exception as e:
         error = f"Error generating embeddings for batch of {len(texts)} texts: {e}"
-        print(error)
+        logger.error(error)
         return [None] * len(texts), error
 
 
