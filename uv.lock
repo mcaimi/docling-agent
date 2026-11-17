@@ -881,7 +881,7 @@ dependencies = [
     { name = "httpx2" },
     { name = "langchain" },
     { name = "langgraph" },
-    { name = "mlflow" },
+    { name = "mlflow", extra = ["kubernetes"] },
     { name = "openai" },
     { name = "python-dotenv" },
     { name = "tenacity" },
@@ -919,7 +919,7 @@ requires-dist = [
     { name = "langchain-milvus", marker = "extra == 'milvus'", specifier = ">=0.4.0" },
     { name = "langchain-milvus", marker = "extra == 'vector-stores'", specifier = ">=0.4.0" },
     { name = "langgraph", specifier = ">=1.2.16" },
-    { name = "mlflow", specifier = ">=3.17.2" },
+    { name = "mlflow", extras = ["kubernetes"], specifier = ">=3.17.2" },
     { name = "moto", extras = ["s3"], marker = "extra == 'dev'", specifier = ">=5.2.5" },
     { name = "openai", specifier = ">=3.37.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
@@ -2651,6 +2651,11 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/67/fb/1b576cbec9a23017529aac0e6c86653da7479c72fa7c070238bbcd8b50fe/mlflow-3.17.2.tar.gz", hash = "sha256:3fcdb58c683362763bf1cb124eea800b4e3253e16cb5e3adf5b5e562af1fdf2b", size = 11165270, upload-time = "2026-10-21T02:08:45.983Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/78/a6/d693e1b3d704d6728a9746cd065bbb58fe19c8558d62536e2d5accd00709/mlflow-3.17.2-py3-none-any.whl", hash = "sha256:4e44c03791beb518d8b0a40b0982d958c2634d902f46d67d7907c82107f21fac", size = 12009627, upload-time = "2026-10-21T02:08:42.779Z" },
+]
+
+[package.optional-dependencies]
+kubernetes = [
+    { name = "kubernetes" },
 ]
 
 [[package]]
