@@ -25,6 +25,7 @@ except ImportError as e:
 
 import logging
 import threading
+import time
 from typing import Any
 
 from ..utils.mlflow_tracing import start_child_span, end_span
@@ -95,8 +96,16 @@ def get_embedding_client(base_url: str, api_key: str) -> OpenAI:
         return client
 
 
+def _int_or_zero(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
 def _embed_batch(
-    client: OpenAI, texts: list[str], model: str, dimensions: int | None = None
+    client: OpenAI,
+    texts: list[str],
+    model: str,
+    dimensions: int | None = None,
+    stats: dict[str, Any] | None = None,
 ) -> tuple[list[list[float] | None], str | None]:
     """
     Embed a single batch of texts (up to _EMBEDDING_BATCH_SIZE items).
@@ -107,7 +116,16 @@ def _embed_batch(
     positions are ``None`` and the second tuple element holds the error
     message (``None`` on success) so callers can surface it instead of
     silently dropping the chunks.
+
+    ``stats``, when given, accumulates tracing metrics (``api_calls``,
+    ``retry_count``, ``api_seconds``, ``prompt_tokens``, ``total_tokens``) --
+    numbers only, never texts or vectors.
     """
+    if stats is None:
+        stats = {}
+    for key in ("api_calls", "retry_count", "prompt_tokens", "total_tokens"):
+        stats.setdefault(key, 0)
+    stats.setdefault("api_seconds", 0.0)
     kwargs: dict[str, Any] = {"input": texts, "model": model}
     if dimensions is not None:
         kwargs["dimensions"] = dimensions
@@ -119,10 +137,19 @@ def _embed_batch(
         reraise=True,
     )
     def _do_create():
-        return client.embeddings.create(**kwargs)
+        stats["api_calls"] += 1
+        started = time.monotonic()
+        try:
+            return client.embeddings.create(**kwargs)
+        finally:
+            stats["api_seconds"] += time.monotonic() - started
 
+    calls_before = stats["api_calls"]
     try:
         response = _do_create()
+        usage = getattr(response, "usage", None)
+        stats["prompt_tokens"] += _int_or_zero(getattr(usage, "prompt_tokens", None))
+        stats["total_tokens"] += _int_or_zero(getattr(usage, "total_tokens", None))
         # Sort by index to ensure correct order (API may return out of order)
         sorted_embeddings = sorted(response.data, key=lambda x: x.index)
         return [item.embedding for item in sorted_embeddings], None
@@ -130,6 +157,8 @@ def _embed_batch(
         error = f"Error generating embeddings for batch of {len(texts)} texts: {e}"
         logger.error(error)
         return [None] * len(texts), error
+    finally:
+        stats["retry_count"] += max(0, stats["api_calls"] - calls_before - 1)
 
 
 # embed the texts
@@ -176,11 +205,12 @@ def embed_texts(
     all_embeddings: list[list[float] | None] = []
     errors: list[str] = []
     embedding_dimensions: int | None = None
+    stats: dict[str, Any] = {}
 
     # Process in batches
     for i in range(0, len(texts), _EMBEDDING_BATCH_SIZE):
         batch = texts[i : i + _EMBEDDING_BATCH_SIZE]
-        batch_embeddings, batch_error = _embed_batch(client, batch, model, dimensions)
+        batch_embeddings, batch_error = _embed_batch(client, batch, model, dimensions, stats)
         all_embeddings.extend(batch_embeddings)
         if batch_error is not None:
             errors.append(batch_error)
@@ -203,6 +233,15 @@ def embed_texts(
     }
     if embedding_dimensions is not None:
         span_attrs["embedding_dimensions"] = embedding_dimensions
+    # Metrics only: the texts and the vectors are never put on the span.
+    span_attrs.update(
+        api_calls=stats.get("api_calls", 0),
+        retry_count=stats.get("retry_count", 0),
+        api_seconds=round(stats.get("api_seconds", 0.0), 3),
+    )
+    if stats.get("total_tokens"):
+        span_attrs["prompt_tokens"] = stats["prompt_tokens"]
+        span_attrs["total_tokens"] = stats["total_tokens"]
     end_span(span, **span_attrs)
 
     return all_embeddings, errors
