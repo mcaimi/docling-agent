@@ -8,6 +8,7 @@ try:
     from openai import OpenAI
     from .prompts.extractor import render as _system_message_render
     from .prompts.extractor import _CONFIG_KEYS, _SENSITIVE_KEYS
+    from ..utils.mlflow_tracing import annotate_active_span
 except ImportError as e:
     raise ImportError(f"openai package is required: {e}") from e
 
@@ -61,6 +62,10 @@ def _is_valid_override(key: str, current: Any, value: Any) -> bool:
     return isinstance(value, type(current))
 
 
+def _int_or_none(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 # extract config keys from natural language user prompt
 def extract_config_from_prompt(
     user_prompt: str,
@@ -99,7 +104,17 @@ def extract_config_from_prompt(
         text = response.choices[0].message.content or ""
     except Exception as e:
         logger.warning("LLM Exception %s", e)
+        annotate_active_span(llm_error=str(e))
         return defaults
+
+    # Token usage only: the prompt and the extracted overrides are recorded
+    # by the caller's span (see docling_agent._run_workflow_with_mlflow).
+    usage = getattr(response, "usage", None)
+    annotate_active_span(
+        llm_prompt_tokens=_int_or_none(getattr(usage, "prompt_tokens", None)),
+        llm_completion_tokens=_int_or_none(getattr(usage, "completion_tokens", None)),
+        llm_total_tokens=_int_or_none(getattr(usage, "total_tokens", None)),
+    )
 
     # Strip markdown code fences if present
     text = text.strip()
@@ -113,6 +128,7 @@ def extract_config_from_prompt(
     try:
         parsed = json.loads(text)
         if not isinstance(parsed, dict):
+            annotate_active_span(llm_response_parsed=False)
             return defaults
         result = dict(defaults)
         for key in _CONFIG_KEYS:
@@ -121,8 +137,10 @@ def extract_config_from_prompt(
             value = parsed.get(key)
             if value is not None:
                 result[key] = value
+        annotate_active_span(llm_response_parsed=True)
         return result
     except (json.JSONDecodeError, ValueError):
+        annotate_active_span(llm_response_parsed=False)
         return defaults
 
 
