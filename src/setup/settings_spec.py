@@ -165,13 +165,6 @@ SETTINGS_SPEC: tuple[SettingSpec, ...] = (
        "MLflow tracking server URI", depends_on=_TRACING),
     _S("mlflow_experiment_name", "MLFLOW_EXPERIMENT_NAME", "str", "Docling Agent", "tracing",
        "MLflow experiment name", depends_on=_TRACING),
-    # Off by default: autolog records every LangGraph task's inputs/outputs,
-    # including whole DoclingDocuments whose uint64 ``binary_hash`` overflows
-    # the tracking server's int64 fields -- the HTTP backend then drops the
-    # entire trace (verified: ~half the per-document traces were lost).
-    _S("mlflow_langchain_autolog", "MLFLOW_LANGCHAIN_AUTOLOG", "bool", 0, "tracing",
-       "Also autolog LangGraph task spans (large payloads; can drop traces on an MLflow server)",
-       depends_on=_TRACING),
     _S("mlflow_session_id", "MLFLOW_SESSION_ID", "str", None, "tracing",
        "Trace session id (default: parent run id, else this run's id)", depends_on=_TRACING),
     _S("mlflow_parent_run_id", "MLFLOW_PARENT_RUN_ID", "str", None, "tracing",

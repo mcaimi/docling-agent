@@ -166,16 +166,17 @@ def _run_workflow_with_mlflow(agent_settings: dict[str, Any]) -> dict[str, Any]:
             f"Cannot import mlflow: {e}. Tracing requires mlflow to be installed."
         ) from e
 
-    from .utils import generate_mlflow_run_name, session_context
+    from .utils import generate_mlflow_run_name, install_payload_guard, session_context
 
     run_name = generate_mlflow_run_name()
     mlflow.set_tracking_uri(agent_settings.get("mlflow_tracking_uri"))
     mlflow.set_experiment(agent_settings.get("mlflow_experiment_name"))
-    # Per-document spans are created explicitly (see document_pipeline.py);
-    # LangGraph task autolog is opt-in, see settings_spec.mlflow_langchain_autolog.
-    if agent_settings.get("mlflow_langchain_autolog"):
-        mlflow.langchain.autolog()
-    mlflow.openai.autolog()
+    # No MLflow autolog (OpenAI or LangChain): it records full request and
+    # response payloads -- every chunk's text and every embedding vector, whole
+    # DoclingDocuments for LangGraph tasks -- which overloads the tracking
+    # server. All spans are created explicitly and carry parameters and
+    # metrics only; the payload guard strips anything bulky that slips through.
+    install_payload_guard()
 
     parent_run_id = agent_settings.get("mlflow_parent_run_id")
     shard_index = int(agent_settings.get("shard_index") or 0)
@@ -221,8 +222,17 @@ def _run_workflow_with_mlflow(agent_settings: dict[str, Any]) -> dict[str, Any]:
         )
 
         with session_context(session_id):
-            with mlflow.start_span("NLP prompt extraction"):
+            with mlflow.start_span("NLP prompt extraction") as span:
+                span.set_inputs(
+                    {
+                        "user_prompt": agent_settings.get("user_prompt") or "",
+                        "llm_model": agent_settings.get("llm_model"),
+                    }
+                )
                 agent_settings, filtered = _apply_nlp_overrides(agent_settings)
+                # Only applied overrides: sensitive keys never get here
+                # (see merge_overrides / extract_config_from_prompt).
+                span.set_outputs({"applied_overrides": filtered})
                 if filtered:
                     mlflow.set_tag(
                         "nlp_extracted_keys", ", ".join(sorted(filtered.keys()))
