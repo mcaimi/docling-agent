@@ -89,7 +89,7 @@ def test_new_settings_defaults(clean_env):
     assert settings["log_format"] == "text"
     assert settings["mlflow_parent_run_id"] is None
     assert settings["scheduler_run_id"] is None
-    assert settings["mlflow_langchain_autolog"] == 0  # opt-in, see settings_spec
+    assert "mlflow_langchain_autolog" not in settings  # autolog removed
     assert settings["source_backend"] == "local"
     assert settings["s3_bucket"] is None
     assert settings["s3_prefix"] == ""
