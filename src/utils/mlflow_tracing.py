@@ -2,9 +2,166 @@
 """MLflow tracing helpers for session-scoped trace grouping and per-document
 nested span trees spanning multiple LangGraph tasks."""
 
+import json
+import sys
 import threading
 from contextlib import contextmanager
 from typing import Any, Generator
+
+# --- span payload guard -------------------------------------------------------
+# Span inputs/outputs/attributes are uploaded to the MLflow tracking server with
+# every trace. Embedding vectors, whole DoclingDocuments or full markdown can
+# turn one trace into megabytes of JSON, which bogs down the server and breaks
+# the agent's API calls to it. Traces must carry parameters and metrics only:
+# the guard below reduces anything bulky to a short, human-readable summary.
+
+# Keys whose values are bulky by nature: always summarized, never sent as-is.
+_BULKY_KEYS = frozenset(
+    {"docling_document", "embeddings", "embedding", "vectors", "content", "documents", "chunks"}
+)
+# Longest string sent verbatim; longer strings become a preview.
+_MAX_STR_CHARS = 200
+# Longest list sent element by element; longer lists are cut with a marker.
+_MAX_LIST_ITEMS = 20
+# A list of at least this many numbers is treated as a vector.
+_MIN_VECTOR_LEN = 8
+# Nesting depth after which values are replaced by their type name.
+_MAX_DEPTH = 6
+# Hard cap on a whole serialized payload (inputs, outputs or one attribute).
+_MAX_PAYLOAD_CHARS = 8192
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_vector(value: Any) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) >= _MIN_VECTOR_LEN
+        and all(_is_number(v) for v in value)
+    )
+
+
+def _preview(text: str) -> str:
+    if len(text) <= _MAX_STR_CHARS:
+        return text
+    return f"{text[:_MAX_STR_CHARS]}... <truncated, {len(text)} chars>"
+
+
+def _summarize_bulky(value: Any) -> Any:
+    """Short description of a value stored under a ``_BULKY_KEYS`` key."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return _preview(value)
+    if _is_vector(value):
+        return f"<vector dim={len(value)}>"
+    if isinstance(value, (list, tuple)):
+        dims = {len(v) for v in value if _is_vector(v)}
+        if dims:
+            dim = dims.pop() if len(dims) == 1 else "mixed"
+            return f"<{len(value)} vectors dim={dim}>"
+        return f"<{len(value)} items>"
+    if isinstance(value, dict):
+        return f"<dict with {len(value)} keys>"
+    return f"<{type(value).__name__}>"
+
+
+def summarize_payload(value: Any, _depth: int = 0) -> Any:
+    """Return a JSON-friendly copy of ``value`` without bulky data.
+
+    Vectors become ``"<vector dim=N>"``, lists of vectors
+    ``"<N vectors dim=D>"``, values under ``_BULKY_KEYS`` (documents,
+    embeddings, markdown content, ...) a short summary, long strings a
+    preview, long lists are cut, and arbitrary objects (e.g. a
+    DoclingDocument) are replaced by their type name. Never mutates
+    ``value``.
+    """
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return _preview(value)
+    if _depth >= _MAX_DEPTH:
+        return f"<{type(value).__name__}>"
+    if isinstance(value, dict):
+        return {
+            str(k): (
+                _summarize_bulky(v) if k in _BULKY_KEYS else summarize_payload(v, _depth + 1)
+            )
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        if _is_vector(value):
+            return f"<vector dim={len(value)}>"
+        if value and all(_is_vector(v) for v in value):
+            return _summarize_bulky(value)
+        items = [summarize_payload(v, _depth + 1) for v in value[:_MAX_LIST_ITEMS]]
+        if len(value) > _MAX_LIST_ITEMS:
+            items.append(f"<{len(value) - _MAX_LIST_ITEMS} more items>")
+        return items
+    return f"<{type(value).__name__}>"
+
+
+def _cap(value: Any) -> Any:
+    """Replace ``value`` by a preview if its JSON form exceeds the payload cap."""
+    try:
+        encoded = json.dumps(value, default=str)
+    except (TypeError, ValueError):
+        return f"<{type(value).__name__}>"
+    if len(encoded) <= _MAX_PAYLOAD_CHARS:
+        return value
+    return f"{encoded[:_MAX_PAYLOAD_CHARS]}... <truncated, {len(encoded)} chars>"
+
+
+def payload_guard(span: Any) -> None:
+    """MLflow span processor: shrink inputs, outputs and attributes before export.
+
+    Registered with ``mlflow.tracing.configure(span_processors=[payload_guard])``
+    when tracing starts (see ``src/docling_agent.py``). It's a safety net: the
+    pipeline only records counts and parameters on its own spans, but this
+    guarantees nothing bulky reaches the tracking server even if a future span
+    records a vector, a document or a whole chunk list.
+    """
+    inputs = span.inputs
+    if inputs is not None:
+        span.set_inputs(_cap(summarize_payload(inputs)))
+    outputs = span.outputs
+    if outputs is not None:
+        span.set_outputs(_cap(summarize_payload(outputs)))
+    for key, value in list((span.attributes or {}).items()):
+        # MLflow keeps its own bookkeeping (trace id, span type, inputs and
+        # outputs) in "mlflow."-prefixed attributes; inputs/outputs were
+        # already handled above through the public setters.
+        if key.startswith("mlflow."):
+            continue
+        reduced = _cap(_summarize_bulky(value) if key in _BULKY_KEYS else summarize_payload(value))
+        if reduced != value:
+            span.set_attribute(key, reduced)
+
+
+def install_payload_guard() -> None:
+    """Register ``payload_guard`` as a global MLflow span processor."""
+    import mlflow
+
+    mlflow.tracing.configure(span_processors=[payload_guard])
+
+
+def annotate_active_span(**attributes: Any) -> None:
+    """Set ``attributes`` on the currently active MLflow span, if there is one.
+
+    No-op when MLflow was never imported (tracing disabled) or no span is
+    active, so callers outside the tracing path don't pay for an import.
+    """
+    mlflow = sys.modules.get("mlflow")
+    if mlflow is None:
+        return
+    span = mlflow.get_current_active_span()
+    if span is None:
+        return
+    for key, value in attributes.items():
+        if value is not None:
+            span.set_attribute(key, value)
 
 
 @contextmanager
@@ -133,8 +290,8 @@ def _no_ambient_span() -> Generator[None, None, None]:
     Needed because ``mlflow.start_span_no_context(name)`` with no explicit
     ``parent_span`` does *not* ignore ambient context -- verified empirically
     that it silently attaches to whatever span is active (e.g. one created by
-    ``mlflow.langchain.autolog()``'s own instrumentation of the LangGraph task
-    that's calling this). When multiple documents' tasks share that ambient
+    an instrumentation library's own span around the LangGraph task that's
+    calling this). When multiple documents' tasks share that ambient
     span, their supposedly-independent root spans all collapse into one trace.
 
     This clears MLflow's own internal tracing context (separate from, and not
@@ -219,6 +376,10 @@ def end_span(span: Any, *, error: str | None = None, **attributes: Any) -> None:
 
 
 __all__ = [
+    "summarize_payload",
+    "payload_guard",
+    "install_payload_guard",
+    "annotate_active_span",
     "session_context",
     "run_context",
     "start_document_span",

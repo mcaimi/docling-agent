@@ -10,6 +10,8 @@ from .mlflow_tracing import (
     start_document_span,
     start_child_span,
     end_span,
+    install_payload_guard,
+    annotate_active_span,
 )
 
 # module symbols
@@ -25,4 +27,6 @@ __all__ = [
     "start_document_span",
     "start_child_span",
     "end_span",
+    "install_payload_guard",
+    "annotate_active_span",
 ]
