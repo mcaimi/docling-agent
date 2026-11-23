@@ -353,8 +353,10 @@ flowchart TB
 
 | When | What is recorded |
 |---|---|
-| CLI with `enable_tracing` / `ENABLE_TRACING=1` | Top-level run, LangChain/OpenAI autolog, workflow spans, metrics, `error_reports.json` artifact |
+| CLI with `enable_tracing` / `ENABLE_TRACING=1` | Top-level run, workflow spans, metrics, `run_summary.json` / `error_reports.json` artifacts (no autolog) |
 | Pipeline modules (`ENABLE_TRACING=1` in env) | Spans on convert, chunk, embed, store (`store_doc`), document listing, and chunking helpers |
+
+**Payload policy:** traces only carry parameters and metrics (counts, token usage, latency, retries). MLflow autolog is not used, because it would upload every chunk's text and every embedding vector and overload the tracking server. A span processor (`payload_guard` in `src/utils/mlflow_tracing.py`) also shrinks anything bulky before export: vectors become `<vector dim=N>`, long text becomes a 200-character preview, and documents become their type name.
 
 **Session grouping:** The CLI sets `mlflow_session_id` to `MLFLOW_SESSION_ID` or the active run’s `run_id`, wraps the instrumented workflow in `mlflow.tracing.context(session_id=...)`, and passes the id in per-document config so parallel tasks tag traces the same way. Filter in the MLflow UI: ``metadata.`mlflow.trace.session` = '<session_id>'``.
 
@@ -423,7 +425,7 @@ Declared in `pyproject.toml`:
 
 - `docling>=2.142.1`
 - `httpx2>=2.16.0` (openai>=3's HTTP transport)
-- `langchain>=1.4.7` (LangGraph runtime; optional MLflow LangChain autolog via `MLFLOW_LANGCHAIN_AUTOLOG=1`)
+- `langchain>=1.4.7` (LangGraph runtime)
 - `langgraph>=1.2.16`
 - `mlflow>=3.17.2`
 - `openai>=3.37.0`
